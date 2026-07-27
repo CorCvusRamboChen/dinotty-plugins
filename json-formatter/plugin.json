@@ -3,6 +3,7 @@
   "name": "JSON Formatter",
   "version": "1.0.0",
   "description": "JSON 格式化、压缩与验证工具",
+  "category": "dev",
   "icon": "braces",
   "entry": "./main.js",
   "styles": "./styles.css",

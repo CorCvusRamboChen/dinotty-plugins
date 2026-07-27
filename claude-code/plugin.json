@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "description": "Visual conversation manager for Claude Code — browse history, create and resume sessions",
   "description_zh": "Claude Code 可视化对话管理 — 浏览历史、新建和恢复会话",
+  "category": "ai",
   "icon": "message-square",
   "entry": "./dist/main.js",
   "bin": { "mode": "cli", "entry": "dist/cli-wrapper" },

@@ -3,6 +3,7 @@
   "name": "Volcano Ark Quota",
   "version": "0.1.1",
   "description": "Display Volcano Engine Ark Flow Plan quota (5h / weekly / monthly) as monitor charts and status bar entries",
+  "category": "ai",
   "icon": "gauge",
   "entry": "./main.js",
   "styles": "./styles.css",

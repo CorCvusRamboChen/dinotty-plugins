@@ -3,6 +3,7 @@
   "name": "CC Switch",
   "version": "2.0.0",
   "description": "快速切换 Claude Code API Provider (基于 cc-switch CLI)",
+  "category": "ai",
   "icon": "repeat",
   "entry": "./dist/main.js",
   "styles": "./styles.css",

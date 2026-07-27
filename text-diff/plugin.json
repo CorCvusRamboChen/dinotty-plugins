@@ -3,6 +3,7 @@
   "name": "Text Diff",
   "version": "1.0.0",
   "description": "文本差异对比工具，支持逐行对比与高亮显示",
+  "category": "dev",
   "icon": "diff",
   "entry": "./main.js",
   "styles": "./styles.css",

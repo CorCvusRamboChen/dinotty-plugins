@@ -3,6 +3,7 @@
   "name": "Skill Manager",
   "version": "1.0.0",
   "description": "管理 Claude Code / Codex / 自定义目录的 Agent Skills",
+  "category": "ai",
   "icon": "zap",
   "entry": "./dist/main.js",
   "styles": "./styles.css",
