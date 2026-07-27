@@ -1,0 +1,13 @@
+{
+  "id": "feishu-notify",
+  "name": "Feishu Notify",
+  "version": "0.1.0",
+  "description": "订阅 dinotty 服务端事件并推送到飞书自定义机器人",
+  "category": "other",
+  "icon": "bell",
+  "entry": "./main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "feishu-notify.open", "title": "打开飞书通知配置" }
+  ]
+}

@@ -181,6 +181,20 @@
       "subdir": "cloudflare-quick-tunnel",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/cloudflare-quick-tunnel"
+    },
+    {
+      "id": "feishu-notify",
+      "name": "Feishu Notify",
+      "description": "Subscribe to dinotty server events and push to Feishu custom bot",
+      "description_zh": "订阅 dinotty 服务端事件并推送到飞书自定义机器人",
+      "category": "other",
+      "version": "0.1.0",
+      "icon": "bell",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "feishu-notify",
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/feishu-notify"
     }
   ]
 }
