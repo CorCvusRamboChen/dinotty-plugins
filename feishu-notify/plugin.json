@@ -7,6 +7,10 @@
   "icon": "bell",
   "entry": "./main.js",
   "styles": "./styles.css",
+  "events": [
+    "auth.verification_code",
+    "auth.verification_code_consumed"
+  ],
   "commands": [
     { "id": "feishu-notify.open", "title": "打开飞书通知配置" }
   ]

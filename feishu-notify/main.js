@@ -24,6 +24,18 @@ const EVENT_OPTIONS = [
     default: true,
   },
   {
+    name: 'auth.verification_code',
+    label: '登录验证码',
+    desc: '验证码登录模式下，6 位验证码已生成（推送到本群）',
+    default: true,
+  },
+  {
+    name: 'auth.verification_code_consumed',
+    label: '验证码已使用',
+    desc: '有人用验证码成功登录，包含 IP 和 UA（若非本人操作请立即 revoke session）',
+    default: true,
+  },
+  {
     name: 'notification.received',
     label: '通知（含等待输入）',
     desc: '所有 /api/notify、OSC、bell 通知 - 含 Claude Code "等待输入"',
@@ -127,6 +139,21 @@ function renderEvent(eventName, data) {
         const until = new Date(data.locked_until * 1000).toLocaleString()
         lines.push(`锁定至: ${until}`)
       }
+      break
+    case 'auth.verification_code':
+      lines.push('🔑 dinotty 登录验证码')
+      lines.push(`验证码: ${data.code}`)
+      lines.push('5 分钟内有效，若非本人请求请忽略')
+      break
+    case 'auth.verification_code_consumed':
+      lines.push('✅ 验证码已使用')
+      lines.push(`IP: ${data.ip}`)
+      if (data.user_agent) lines.push(`UA: ${data.user_agent}`)
+      if (data.occurred_at) {
+        const t = new Date(data.occurred_at).toLocaleString()
+        lines.push(`时间: ${t}`)
+      }
+      lines.push('若非本人操作请立即在设置中 revoke 该 session')
       break
     case 'notification.received': {
       const typeLabel = {
