@@ -43,20 +43,6 @@
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/json-formatter"
     },
     {
-      "id": "skill-manager",
-      "name": "Skill Manager",
-      "description": "Manage Claude Code Agent Skills (~/.claude/skills/)",
-      "description_zh": "管理 Claude Code Agent Skills (~/.claude/skills/)",
-      "category": "ai",
-      "version": "1.0.0",
-      "icon": "zap",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
-      "subdir": "skill-manager",
-      "author": "dinotty",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/skill-manager"
-    },
-    {
       "id": "text-diff",
       "name": "Text Diff",
       "description": "Text diff comparison tool with line-by-line highlighting",
@@ -69,20 +55,6 @@
       "subdir": "text-diff",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/text-diff"
-    },
-    {
-      "id": "claude-code",
-      "name": "Claude Code",
-      "description": "Visual conversation manager for Claude Code - browse history, create and resume sessions",
-      "description_zh": "Claude Code 可视化对话管理 - 浏览历史、新建和恢复会话",
-      "category": "ai",
-      "version": "1.0.0",
-      "icon": "message-square",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
-      "subdir": "claude-code",
-      "author": "dinotty",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/claude-code"
     },
     {
       "id": "session-browser",
@@ -125,34 +97,6 @@
       "subdir": "jiahao-globe",
       "author": "jiahao",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-globe"
-    },
-    {
-      "id": "jiahao-monitor",
-      "name": "Jiahao Monitor",
-      "description": "eDEX-UI style system monitor with CPU, RAM and disk usage charts",
-      "description_zh": "eDEX-UI 风格系统监控，CPU、内存、磁盘使用率实时图表",
-      "category": "system",
-      "version": "1.0.0",
-      "icon": "activity",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
-      "subdir": "jiahao-monitor",
-      "author": "jiahao",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-monitor"
-    },
-    {
-      "id": "jiahao-time",
-      "name": "Jiahao Time",
-      "description": "eDEX-UI style clock with red digits and Chinese date display",
-      "description_zh": "eDEX-UI 风格时钟，红色数字显示时间和中文日期",
-      "category": "other",
-      "version": "1.0.0",
-      "icon": "clock",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
-      "subdir": "jiahao-time",
-      "author": "jiahao",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-time"
     },
     {
       "id": "jiahao-keyboard",
