@@ -1,0 +1,18 @@
+{
+  "id": "taskflow",
+  "name": "Taskflow",
+  "version": "0.1.0",
+  "minAppVersion": "0.5.0",
+  "description": "Agentic task flow - todo -> in-progress -> done, each task runs in a configurable agent CLI tab",
+  "description_zh": "AI 任务流管理 - 待办 -> 进行中 -> 完成，每个任务在一个可配置的 agent CLI tab 中执行",
+  "category": "ai",
+  "icon": "list-todo",
+  "entry": "./dist/main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "taskflow.open", "title": "打开 Taskflow" },
+    { "id": "taskflow.new", "title": "新建任务" },
+    { "id": "taskflow.start", "title": "开始最近一个待办" },
+    { "id": "taskflow.complete", "title": "完成当前进行中任务" }
+  ]
+}

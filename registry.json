@@ -139,6 +139,20 @@
       "subdir": "feishu-notify",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/feishu-notify"
+    },
+    {
+      "id": "taskflow",
+      "name": "Taskflow",
+      "description": "Agentic task flow - todo -> in-progress -> done, each task runs in a configurable agent CLI tab",
+      "description_zh": "AI 任务流管理 - 待办 -> 进行中 -> 完成，每个任务在一个可配置的 agent CLI tab 中执行",
+      "category": "ai",
+      "version": "0.1.0",
+      "icon": "list-todo",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "taskflow",
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/taskflow"
     }
   ]
 }

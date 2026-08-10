@@ -1,0 +1,14 @@
+{
+  "name": "dinotty-plugin-taskflow",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild src/ui.ts --bundle --format=esm --outfile=dist/main.js --platform=browser",
+    "dev": "esbuild src/ui.ts --bundle --format=esm --outfile=dist/main.js --platform=browser --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "typescript": "~5.7.0"
+  }
+}
