@@ -78,10 +78,21 @@ export interface PluginContext {
   terminal: {
     send(paneId: string, data: string): void
     activePaneId(): string | null
+    /** Returns the active terminal tab's cwd, or the last known terminal cwd,
+     *  or the active workspace path. null if none are available. */
+    activeCwd(): string | null
+    listPanes(): Array<{ id: string; title: string; active: boolean }>
     onOutput(callback: (paneId: string, data: string) => void): Disposable
     createTab(command?: string): Promise<string>
     /** Open a terminal tab in cwd and execute argv directly, without an intermediary shell. */
     createTerminalTab(opts: { cwd: string; argv: string[]; title?: string }): Promise<string>
+    /** Split the active terminal pane. Returns the new pane id, or null if no
+     *  terminal tab is active. The new pane spawns a shell (use ctx.terminal.send
+     *  to launch a command inside it). */
+    splitTerminalPane(opts?: {
+      direction?: 'horizontal' | 'vertical'
+      cwd?: string
+    }): Promise<string | null>
   }
 
   settings: {
