@@ -247,7 +247,7 @@ export function activate(ctx) {
     while (unsubscribers.length) {
       const u = unsubscribers.pop()
       try {
-        u()
+        u.dispose()
       } catch {
         // ignore
       }
