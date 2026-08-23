@@ -153,6 +153,20 @@
       "subdir": "taskflow",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/taskflow"
+    },
+    {
+      "id": "overlay-demo",
+      "name": "Overlay Demo",
+      "description": "Demo of the global overlay contribution point: whole-mode FAB, grip-mode dashboard, passive status pill",
+      "description_zh": "全局 overlay 贡献点示例：whole 模式 FAB、grip 模式看板、被动状态条",
+      "category": "other",
+      "version": "0.1.0",
+      "icon": "layers",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "overlay-demo",
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/overlay-demo"
     }
   ]
 }

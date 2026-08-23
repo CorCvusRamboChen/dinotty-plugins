@@ -1,0 +1,11 @@
+{
+  "id": "overlay-demo",
+  "name": "Overlay Demo",
+  "version": "0.1.0",
+  "description": "Demo of the global overlay contribution point: whole-mode FAB, grip-mode dashboard, passive status pill",
+  "description_zh": "全局 overlay 贡献点示例：whole 模式 FAB、grip 模式看板、被动状态条",
+  "category": "other",
+  "icon": "layers",
+  "entry": "./main.js",
+  "styles": "./styles.css"
+}
