@@ -118,6 +118,7 @@ export default function activate(ctx) {
 ```
 dinotty-plugins/
   registry.json              # Plugin registry manifest
+  _shared/                   # Shared host-bridge modules (vue runtime + singleton composable shims)
   cloudflare-quick-tunnel/   # Development-only Cloudflare Quick Tunnel sharing plugin (TypeScript + Rust)
   cc-switch/                 # API provider switcher (TypeScript + Bash)
   command-bookmarks/         # Terminal command bookmarks (JavaScript)
