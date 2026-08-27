@@ -13,8 +13,9 @@ import { probeClaude } from './claude'
 import { runTurn } from './turn'
 import { runPermissionServer } from './mcp-permission'
 import { listSessions } from './sessions'
+import { listPeers, readTranscript, transcriptPath } from './peers'
 
-const SUBCOMMANDS = ['probe', 'turn', 'sessions', 'mcp-permission', 'help'] as const
+const SUBCOMMANDS = ['probe', 'turn', 'sessions', 'peers', 'mirror', 'mcp-permission', 'help'] as const
 
 function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n')
@@ -50,6 +51,26 @@ async function main(): Promise<void> {
         break
       }
       emit({ type: 'sessions', sessions: listSessions(cwd) })
+      code = 0
+      break
+    }
+    case 'peers': {
+      // Live sessions on this machine, read from their own registration files.
+      emit({ type: 'peers', peers: listPeers() })
+      code = 0
+      break
+    }
+    case 'mirror': {
+      // One read of another session's transcript from a byte offset. The pane
+      // polls this; keeping it a single shot means no process to supervise.
+      const [cwd, sessionId, offsetArg] = rest
+      if (!cwd || !sessionId) {
+        emit({ type: 'error', error: 'usage: mirror <cwd> <session-id> [offset]' })
+        code = 1
+        break
+      }
+      const offset = Number.parseInt(offsetArg ?? '0', 10) || 0
+      emit({ type: 'mirror', ...readTranscript(transcriptPath(cwd, sessionId), offset) })
       code = 0
       break
     }

@@ -13,7 +13,7 @@
     "build": "npm run build:cli && npm run build:ui && npm run set:cli-executable",
     "typecheck": "tsc --noEmit",
     "test": "npm run build:test-modules && node --test test/*.test.mjs",
-    "build:test-modules": "esbuild src/protocol.ts --bundle --format=esm --outfile=dist/protocol.mjs --platform=neutral && esbuild src/reduce.ts --bundle --format=esm --outfile=dist/reduce.mjs --platform=neutral && esbuild src/versions.ts --bundle --format=esm --outfile=dist/versions.mjs --platform=neutral && esbuild src/turn.ts --bundle --platform=node --format=esm --outfile=dist/turn.mjs && esbuild src/mcp-permission.ts --bundle --platform=node --format=esm --outfile=dist/mcp-permission.mjs && esbuild src/sessions.ts --bundle --platform=node --format=esm --outfile=dist/sessions.mjs"
+    "build:test-modules": "esbuild src/protocol.ts --bundle --format=esm --outfile=dist/protocol.mjs --platform=neutral && esbuild src/reduce.ts --bundle --format=esm --outfile=dist/reduce.mjs --platform=neutral && esbuild src/versions.ts --bundle --format=esm --outfile=dist/versions.mjs --platform=neutral && esbuild src/turn.ts --bundle --platform=node --format=esm --outfile=dist/turn.mjs && esbuild src/mcp-permission.ts --bundle --platform=node --format=esm --outfile=dist/mcp-permission.mjs && esbuild src/sessions.ts --bundle --platform=node --format=esm --outfile=dist/sessions.mjs && esbuild src/peers.ts --bundle --platform=node --format=esm --outfile=dist/peers.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",

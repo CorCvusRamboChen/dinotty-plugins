@@ -804,8 +804,119 @@ function listSessions(cwd) {
   return names.filter((name) => name.endsWith(".jsonl")).map((name) => summarise(path4.join(dir, name), name.slice(0, -".jsonl".length))).filter((s) => s !== null).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+// src/peers.ts
+var fs5 = __toESM(require("node:fs"));
+var os3 = __toESM(require("node:os"));
+var path5 = __toESM(require("node:path"));
+function sessionsDir() {
+  return path5.join(os3.homedir(), ".claude", "sessions");
+}
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function listPeers() {
+  let names;
+  try {
+    names = fs5.readdirSync(sessionsDir());
+  } catch {
+    return [];
+  }
+  const peers = [];
+  for (const file of names) {
+    if (!file.endsWith(".json")) continue;
+    let record;
+    try {
+      record = JSON.parse(fs5.readFileSync(path5.join(sessionsDir(), file), "utf-8"));
+    } catch {
+      continue;
+    }
+    if (typeof record?.pid !== "number" || typeof record?.sessionId !== "string") continue;
+    peers.push({
+      pid: record.pid,
+      sessionId: record.sessionId,
+      name: typeof record.name === "string" ? record.name : record.sessionId.slice(0, 8),
+      cwd: typeof record.cwd === "string" ? record.cwd : "",
+      kind: typeof record.kind === "string" ? record.kind : "unknown",
+      entrypoint: typeof record.entrypoint === "string" ? record.entrypoint : null,
+      startedAt: typeof record.startedAt === "number" ? record.startedAt : 0,
+      version: typeof record.version === "string" ? record.version : null,
+      alive: isAlive(record.pid),
+      reachable: typeof record.messagingSocketPath === "string" && record.messagingSocketPath !== ""
+    });
+  }
+  return peers.sort((a, b) => Number(b.alive) - Number(a.alive) || b.startedAt - a.startedAt);
+}
+function transcriptPath(cwd, sessionId) {
+  return path5.join(os3.homedir(), ".claude", "projects", encodeProjectDir(cwd), `${sessionId}.jsonl`);
+}
+function readTranscript(file, fromOffset = 0) {
+  let size;
+  try {
+    size = fs5.statSync(file).size;
+  } catch {
+    return { messages: [], offset: 0, continuous: false };
+  }
+  if (size < fromOffset) return { messages: [], offset: 0, continuous: false };
+  if (size === fromOffset) return { messages: [], offset: fromOffset, continuous: true };
+  const handle = fs5.openSync(file, "r");
+  let chunk;
+  try {
+    const buffer = Buffer.alloc(size - fromOffset);
+    const read = fs5.readSync(handle, buffer, 0, buffer.length, fromOffset);
+    chunk = buffer.subarray(0, read).toString("utf-8");
+  } finally {
+    fs5.closeSync(handle);
+  }
+  const lastNewline = chunk.lastIndexOf("\n");
+  if (lastNewline === -1) {
+    return { messages: [], offset: fromOffset, continuous: true };
+  }
+  const complete = chunk.slice(0, lastNewline);
+  const consumed = fromOffset + Buffer.byteLength(complete, "utf-8") + 1;
+  const messages = [];
+  for (const line of complete.split("\n")) {
+    if (!line.trim()) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const message = toMessage(entry);
+    if (message) messages.push(message);
+  }
+  return { messages, offset: consumed, continuous: true };
+}
+function toMessage(entry) {
+  if (entry?.isSidechain) return null;
+  if (entry?.type === "user") {
+    const text = flatten(entry?.message?.content);
+    return text ? { role: "user", text } : null;
+  }
+  if (entry?.type === "assistant") {
+    const text = flatten(entry?.message?.content);
+    return text ? { role: "assistant", text } : null;
+  }
+  return null;
+}
+function flatten(content) {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  const parts = [];
+  for (const part of content) {
+    if (part?.type === "text" && typeof part.text === "string") parts.push(part.text);
+    else if (part?.type === "tool_use" && typeof part.name === "string") parts.push(`[${part.name}]`);
+  }
+  return parts.join("").trim();
+}
+
 // src/cli.ts
-var SUBCOMMANDS = ["probe", "turn", "sessions", "mcp-permission", "help"];
+var SUBCOMMANDS = ["probe", "turn", "sessions", "peers", "mirror", "mcp-permission", "help"];
 function emit2(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
 }
@@ -833,6 +944,23 @@ async function main() {
         break;
       }
       emit2({ type: "sessions", sessions: listSessions(cwd) });
+      code = 0;
+      break;
+    }
+    case "peers": {
+      emit2({ type: "peers", peers: listPeers() });
+      code = 0;
+      break;
+    }
+    case "mirror": {
+      const [cwd, sessionId, offsetArg] = rest;
+      if (!cwd || !sessionId) {
+        emit2({ type: "error", error: "usage: mirror <cwd> <session-id> [offset]" });
+        code = 1;
+        break;
+      }
+      const offset = Number.parseInt(offsetArg ?? "0", 10) || 0;
+      emit2({ type: "mirror", ...readTranscript(transcriptPath(cwd, sessionId), offset) });
       code = 0;
       break;
     }
