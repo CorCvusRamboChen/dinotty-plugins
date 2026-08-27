@@ -329,6 +329,124 @@ function describe(e) {
   return e instanceof Error ? e.message : String(e);
 }
 
+// src/mirror.ts
+var POLL_INTERVAL_MS2 = 1e3;
+var MAX_MESSAGES = 300;
+function createMirror(ctx) {
+  const state = ctx.reactive({
+    peers: [],
+    peersLoading: false,
+    watching: null,
+    messages: [],
+    following: false,
+    error: null
+  });
+  let offset = 0;
+  let timer = null;
+  let disposed = false;
+  let generation = 0;
+  async function callSidecar(args) {
+    const res = await ctx.exec.run(args, { timeout: 2e4 });
+    if (res.code !== 0) {
+      state.error = res.stderr.trim() || `sidecar exited with code ${res.code}`;
+      return null;
+    }
+    for (const line of res.stdout.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const parsed = JSON.parse(line);
+        if (parsed?.type === "error") {
+          state.error = String(parsed.error);
+          return null;
+        }
+        return parsed;
+      } catch {
+      }
+    }
+    return null;
+  }
+  async function refreshPeers() {
+    if (state.peersLoading) return;
+    state.peersLoading = true;
+    state.error = null;
+    try {
+      const parsed = await callSidecar(["peers"]);
+      if (parsed?.type === "peers") {
+        state.peers = parsed.peers.filter((p) => p.alive);
+      }
+    } catch (e) {
+      state.error = describe2(e);
+    } finally {
+      state.peersLoading = false;
+    }
+  }
+  function scheduleTick(mine) {
+    timer = setTimeout(() => {
+      void tick(mine);
+    }, POLL_INTERVAL_MS2);
+  }
+  async function tick(mine) {
+    if (disposed || mine !== generation || !state.watching) return;
+    try {
+      const parsed = await callSidecar([
+        "mirror",
+        state.watching.cwd,
+        state.watching.sessionId,
+        String(offset)
+      ]);
+      if (mine !== generation) return;
+      if (parsed?.type === "mirror") {
+        if (!parsed.continuous) {
+          offset = 0;
+          state.messages = [];
+        } else {
+          if (parsed.messages.length) {
+            state.messages.push(...parsed.messages);
+            if (state.messages.length > MAX_MESSAGES) {
+              state.messages.splice(0, state.messages.length - MAX_MESSAGES);
+            }
+          }
+          offset = parsed.offset;
+        }
+      }
+    } catch (e) {
+      state.error = describe2(e);
+    } finally {
+      if (!disposed && mine === generation && state.watching) scheduleTick(mine);
+    }
+  }
+  async function watch(peer) {
+    stop();
+    state.watching = peer;
+    state.messages = [];
+    state.error = null;
+    state.following = true;
+    offset = 0;
+    const mine = ++generation;
+    await tick(mine);
+  }
+  function stop() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    generation++;
+    state.following = false;
+    state.watching = null;
+  }
+  function dispose() {
+    disposed = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  }
+  return { state, refreshPeers, watch, stop, dispose };
+}
+function describe2(e) {
+  return e instanceof Error ? e.message : String(e);
+}
+
 // src/ui.ts
 var PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk"];
 var STRINGS = {
@@ -358,6 +476,15 @@ var STRINGS = {
     deny: "Deny",
     toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
     toolsHint: "Checked tools run without asking.",
+    tabChat: "Chat",
+    tabWatch: "Watch a session",
+    watchHint: "Follow a conversation running elsewhere on this machine \u2014 your Claude Desktop window, or a terminal \u2014 read-only, live.",
+    watchPick: "Pick a session to watch",
+    watchEmpty: "No live sessions found.",
+    watchLoading: "Looking for live sessions\u2026",
+    watchingLabel: (name) => `Watching ${name}`,
+    watchStop: "Stop watching",
+    watchRefresh: "Refresh",
     attach: "Continue a session",
     attachHint: "Pick up a conversation started anywhere on this machine \u2014 the CLI, Claude Desktop, or an earlier pane.",
     attachEmpty: "No sessions found for this working directory.",
@@ -391,6 +518,15 @@ var STRINGS = {
     deny: "\u62D2\u7EDD",
     toolsLabel: (allowed, total) => `\u5DE5\u5177 ${allowed}/${total}`,
     toolsHint: "\u52FE\u9009\u7684\u5DE5\u5177\u4E0D\u518D\u8BE2\u95EE\u3002",
+    tabChat: "\u5BF9\u8BDD",
+    tabWatch: "\u89C2\u770B\u4F1A\u8BDD",
+    watchHint: "\u5B9E\u65F6\u8DDF\u968F\u8FD9\u53F0\u673A\u5668\u4E0A\u522B\u5904\u6B63\u5728\u8FDB\u884C\u7684\u5BF9\u8BDD \u2014\u2014 \u4F60\u7684 Claude Desktop \u7A97\u53E3,\u6216\u67D0\u4E2A\u7EC8\u7AEF \u2014\u2014 \u53EA\u8BFB\u3002",
+    watchPick: "\u9009\u62E9\u8981\u89C2\u770B\u7684\u4F1A\u8BDD",
+    watchEmpty: "\u6CA1\u6709\u627E\u5230\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD\u3002",
+    watchLoading: "\u6B63\u5728\u67E5\u627E\u4F1A\u8BDD\u2026",
+    watchingLabel: (name) => `\u6B63\u5728\u89C2\u770B ${name}`,
+    watchStop: "\u505C\u6B62\u89C2\u770B",
+    watchRefresh: "\u5237\u65B0",
     attach: "\u63A5\u5165\u4F1A\u8BDD",
     attachHint: "\u63A5\u4E0A\u8FD9\u53F0\u673A\u5668\u4E0A\u5DF2\u6709\u7684\u5BF9\u8BDD \u2014\u2014 \u547D\u4EE4\u884C\u3001Claude Desktop\uFF0C\u6216\u4E4B\u524D\u7684\u9762\u677F\u90FD\u884C\u3002",
     attachEmpty: "\u8FD9\u4E2A\u5DE5\u4F5C\u76EE\u5F55\u4E0B\u6CA1\u6709\u627E\u5230\u4F1A\u8BDD\u3002",
@@ -405,6 +541,8 @@ function activate(ctx) {
   const probeError = ctx.ref("");
   const probing = ctx.ref(false);
   const conversations = /* @__PURE__ */ new Map();
+  const mirrors = /* @__PURE__ */ new Map();
+  const viewModes = /* @__PURE__ */ new Map();
   let syntheticKeys = 0;
   const syntheticByProps = /* @__PURE__ */ new WeakMap();
   function keyFor(props) {
@@ -426,6 +564,15 @@ function activate(ctx) {
       void conversation.restore();
     }
     return conversation;
+  }
+  function mirrorFor(props) {
+    const key = keyFor(props);
+    let mirror = mirrors.get(key);
+    if (!mirror) {
+      mirror = createMirror(ctx);
+      mirrors.set(key, mirror);
+    }
+    return mirror;
   }
   function t() {
     const locale = ctx.i18n.getLocale();
@@ -500,12 +647,28 @@ function activate(ctx) {
     if (p.versionOk === false) return renderErrorPanel(s.tooOld, s.tooOldHint(p.version ?? "?", p.minVersion));
     return null;
   }
-  function renderHeader(conversation) {
+  function renderModeTabs(key) {
+    const s = t();
+    const mode = viewModes.get(key) ?? "chat";
+    const tab = (id, label) => h("button", {
+      class: "cr-tab" + (mode === id ? " cr-tab-on" : ""),
+      onClick: () => {
+        viewModes.set(key, id);
+        if (id === "watch") {
+          const m = mirrors.get(key);
+          if (m && !m.state.watching && !m.state.peers.length) void m.refreshPeers();
+        }
+      }
+    }, label);
+    return h("div", { class: "cr-tabs" }, [tab("chat", s.tabChat), tab("watch", s.tabWatch)]);
+  }
+  function renderHeader(conversation, paneKey) {
     const s = t();
     const p = probe.value;
     const { state } = conversation;
     return h("div", { class: "cr-header" }, [
       h("span", { class: "cr-header-title" }, s.title),
+      renderModeTabs(paneKey),
       // The detected CLI, shown from the moment the probe lands: before a turn
       // runs it is the only evidence the environment was found at all.
       p?.version ? h("span", { class: "cr-header-meta" }, `claude ${p.version}`) : null,
@@ -630,6 +793,52 @@ function activate(ctx) {
       ])))
     ]);
   }
+  function renderWatch(props) {
+    const s = t();
+    const mirror = mirrorFor(props);
+    const { state } = mirror;
+    if (!state.watching) {
+      return h("div", { class: "cr-watch" }, [
+        h("div", { class: "cr-watch-hint" }, s.watchHint),
+        h("div", { class: "cr-watch-bar" }, [
+          h("span", { class: "cr-watch-pick" }, s.watchPick),
+          h("button", {
+            class: "cr-btn cr-btn-small",
+            disabled: state.peersLoading,
+            onClick: () => void mirror.refreshPeers()
+          }, s.watchRefresh)
+        ]),
+        state.error ? h("div", { class: "cr-watch-error" }, state.error) : null,
+        state.peersLoading && !state.peers.length ? h("div", { class: "cr-watch-empty" }, s.watchLoading) : !state.peers.length ? h("div", { class: "cr-watch-empty" }, s.watchEmpty) : h("div", { class: "cr-picker-list" }, state.peers.map((peer) => h("button", {
+          class: "cr-picker-row",
+          key: peer.pid,
+          onClick: () => void mirror.watch(peer)
+        }, [
+          h("span", { class: "cr-picker-title" }, peer.name),
+          h(
+            "span",
+            { class: "cr-picker-meta" },
+            `${peer.entrypoint || peer.kind} \xB7 ${shortCwd(peer.cwd)}`
+          )
+        ])))
+      ].filter(Boolean));
+    }
+    return h("div", { class: "cr-watch" }, [
+      h("div", { class: "cr-watch-bar" }, [
+        h("span", { class: "cr-watch-live" }, s.watchingLabel(state.watching.name)),
+        h("button", {
+          class: "cr-btn cr-btn-small",
+          onClick: () => mirror.stop()
+        }, s.watchStop)
+      ]),
+      state.error ? h("div", { class: "cr-watch-error" }, state.error) : null,
+      h(
+        "div",
+        { class: "cr-transcript cr-transcript-mirror" },
+        state.messages.length ? state.messages.map((m, i) => h("div", { class: `cr-msg cr-msg-${m.role}`, key: i }, m.text)) : h("div", { class: "cr-empty" }, s.watchLoading)
+      )
+    ].filter(Boolean));
+  }
   function renderComposer(conversation) {
     const s = t();
     const { state } = conversation;
@@ -675,10 +884,18 @@ function activate(ctx) {
       props: ["paneId", "workspaceId", "isVisible", "isFocused"],
       setup(props) {
         const conversation = conversationFor(props);
+        const paneKey = keyFor(props);
         return () => {
+          const mode = viewModes.get(paneKey) ?? "chat";
+          if (mode === "watch") {
+            return h("div", { class: "cr-root" }, [
+              renderHeader(conversation, paneKey),
+              renderWatch(props)
+            ]);
+          }
           const blocker = ready.value ? null : renderBlocker();
           return h("div", { class: "cr-root" }, [
-            renderHeader(conversation),
+            renderHeader(conversation, paneKey),
             blocker ?? h("div", { class: "cr-body" }, [
               renderPicker(conversation),
               renderTools(conversation),
@@ -692,9 +909,15 @@ function activate(ctx) {
     },
     dispose() {
       for (const conversation of conversations.values()) conversation.dispose();
+      for (const mirror of mirrors.values()) mirror.dispose();
       conversations.clear();
+      mirrors.clear();
     }
   };
+}
+function shortCwd(cwd) {
+  const parts = cwd.replace(/[\/]+$/, "").split(/[\/]/);
+  return parts.slice(-2).join("/") || cwd;
 }
 function summariseInput(input) {
   if (input === null || input === void 0) return "";

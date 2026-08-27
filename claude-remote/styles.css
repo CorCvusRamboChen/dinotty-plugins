@@ -429,3 +429,79 @@
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* --- Chat / Watch tabs & mirror view ---------------------------------- */
+
+.plugin-host-claude-remote .cr-tabs {
+  display: flex;
+  gap: 2px;
+  margin-left: 10px;
+}
+
+.plugin-host-claude-remote .cr-tab {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--fg-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plugin-host-claude-remote .cr-tab-on {
+  border-color: var(--accent);
+  color: var(--fg-bright);
+  background: var(--bg-surface);
+}
+
+.plugin-host-claude-remote .cr-watch {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 12px;
+}
+
+.plugin-host-claude-remote .cr-watch-hint {
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+
+.plugin-host-claude-remote .cr-watch-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.plugin-host-claude-remote .cr-watch-pick,
+.plugin-host-claude-remote .cr-watch-live {
+  font-size: 13px;
+  color: var(--fg);
+}
+
+.plugin-host-claude-remote .cr-watch-live {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.plugin-host-claude-remote .cr-watch-empty,
+.plugin-host-claude-remote .cr-watch-error {
+  color: var(--fg-muted);
+  font-size: 12px;
+  padding: 8px 0;
+}
+
+.plugin-host-claude-remote .cr-watch-error {
+  color: var(--danger);
+}
+
+/* The mirror scrolls on its own so the bar stays put while the feed grows. */
+.plugin-host-claude-remote .cr-transcript-mirror {
+  border: 1px solid var(--divider);
+  border-radius: var(--radius);
+  background: var(--bg);
+}

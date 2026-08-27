@@ -2,6 +2,7 @@ import type { PluginContext, PluginExports } from '../../plugin-api/index'
 import type { ClaudeProbe } from './claude'
 import { PER_CALL_APPROVAL_SINCE } from './versions'
 import { createConversation, type Conversation } from './conversation'
+import { createMirror, type Mirror } from './mirror'
 
 /**
  * The pane: transcript, composer, tool allowlist, and the Allow / Deny card.
@@ -44,6 +45,15 @@ interface Strings {
   deny: string
   toolsLabel: (allowed: number, total: number) => string
   toolsHint: string
+  tabChat: string
+  tabWatch: string
+  watchHint: string
+  watchPick: string
+  watchEmpty: string
+  watchLoading: string
+  watchingLabel: (name: string) => string
+  watchStop: string
+  watchRefresh: string
   attach: string
   attachHint: string
   attachEmpty: string
@@ -83,6 +93,15 @@ const STRINGS: Record<Locale, Strings> = {
     deny: 'Deny',
     toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
     toolsHint: 'Checked tools run without asking.',
+    tabChat: 'Chat',
+    tabWatch: 'Watch a session',
+    watchHint: 'Follow a conversation running elsewhere on this machine — your Claude Desktop window, or a terminal — read-only, live.',
+    watchPick: 'Pick a session to watch',
+    watchEmpty: 'No live sessions found.',
+    watchLoading: 'Looking for live sessions…',
+    watchingLabel: name => `Watching ${name}`,
+    watchStop: 'Stop watching',
+    watchRefresh: 'Refresh',
     attach: 'Continue a session',
     attachHint: 'Pick up a conversation started anywhere on this machine — the CLI, Claude Desktop, or an earlier pane.',
     attachEmpty: 'No sessions found for this working directory.',
@@ -116,6 +135,15 @@ const STRINGS: Record<Locale, Strings> = {
     deny: '拒绝',
     toolsLabel: (allowed, total) => `工具 ${allowed}/${total}`,
     toolsHint: '勾选的工具不再询问。',
+    tabChat: '对话',
+    tabWatch: '观看会话',
+    watchHint: '实时跟随这台机器上别处正在进行的对话 —— 你的 Claude Desktop 窗口,或某个终端 —— 只读。',
+    watchPick: '选择要观看的会话',
+    watchEmpty: '没有找到正在运行的会话。',
+    watchLoading: '正在查找会话…',
+    watchingLabel: name => `正在观看 ${name}`,
+    watchStop: '停止观看',
+    watchRefresh: '刷新',
     attach: '接入会话',
     attachHint: '接上这台机器上已有的对话 —— 命令行、Claude Desktop，或之前的面板都行。',
     attachEmpty: '这个工作目录下没有找到会话。',
@@ -136,6 +164,9 @@ export function activate(ctx: PluginContext): PluginExports {
   // Per-pane. The plugin tab has no paneId of its own, so it gets a stable
   // synthetic key rather than colliding with a real pane.
   const conversations = new Map<string, Conversation>()
+  const mirrors = new Map<string, Mirror>()
+  // 'chat' = drive a session here; 'watch' = mirror another session read-only.
+  const viewModes = new Map<string, 'chat' | 'watch'>()
   let syntheticKeys = 0
   const syntheticByProps = new WeakMap<object, string>()
 
@@ -159,6 +190,13 @@ export function activate(ctx: PluginContext): PluginExports {
       void conversation.restore()
     }
     return conversation
+  }
+
+  function mirrorFor(props: any): Mirror {
+    const key = keyFor(props)
+    let mirror = mirrors.get(key)
+    if (!mirror) { mirror = createMirror(ctx); mirrors.set(key, mirror) }
+    return mirror
   }
 
   function t(): Strings {
@@ -229,12 +267,30 @@ export function activate(ctx: PluginContext): PluginExports {
     return null
   }
 
-  function renderHeader(conversation: Conversation) {
+  function renderModeTabs(key: string) {
+    const s = t()
+    const mode = viewModes.get(key) ?? 'chat'
+    const tab = (id: 'chat' | 'watch', label: string) =>
+      h('button', {
+        class: 'cr-tab' + (mode === id ? ' cr-tab-on' : ''),
+        onClick: () => {
+          viewModes.set(key, id)
+          if (id === 'watch') {
+            const m = mirrors.get(key)
+            if (m && !m.state.watching && !m.state.peers.length) void m.refreshPeers()
+          }
+        },
+      }, label)
+    return h('div', { class: 'cr-tabs' }, [tab('chat', s.tabChat), tab('watch', s.tabWatch)])
+  }
+
+  function renderHeader(conversation: Conversation, paneKey: string) {
     const s = t()
     const p = probe.value
     const { state } = conversation
     return h('div', { class: 'cr-header' }, [
       h('span', { class: 'cr-header-title' }, s.title),
+      renderModeTabs(paneKey),
       // The detected CLI, shown from the moment the probe lands: before a turn
       // runs it is the only evidence the environment was found at all.
       p?.version ? h('span', { class: 'cr-header-meta' }, `claude ${p.version}`) : null,
@@ -380,6 +436,57 @@ export function activate(ctx: PluginContext): PluginExports {
     ])
   }
 
+  function renderWatch(props: any) {
+    const s = t()
+    const mirror = mirrorFor(props)
+    const { state } = mirror
+
+    if (!state.watching) {
+      return h('div', { class: 'cr-watch' }, [
+        h('div', { class: 'cr-watch-hint' }, s.watchHint),
+        h('div', { class: 'cr-watch-bar' }, [
+          h('span', { class: 'cr-watch-pick' }, s.watchPick),
+          h('button', {
+            class: 'cr-btn cr-btn-small',
+            disabled: state.peersLoading,
+            onClick: () => void mirror.refreshPeers(),
+          }, s.watchRefresh),
+        ]),
+        state.error ? h('div', { class: 'cr-watch-error' }, state.error) : null,
+        state.peersLoading && !state.peers.length
+          ? h('div', { class: 'cr-watch-empty' }, s.watchLoading)
+          : !state.peers.length
+            ? h('div', { class: 'cr-watch-empty' }, s.watchEmpty)
+            : h('div', { class: 'cr-picker-list' }, state.peers.map(peer =>
+                h('button', {
+                  class: 'cr-picker-row',
+                  key: peer.pid,
+                  onClick: () => void mirror.watch(peer),
+                }, [
+                  h('span', { class: 'cr-picker-title' }, peer.name),
+                  h('span', { class: 'cr-picker-meta' },
+                    `${peer.entrypoint || peer.kind} · ${shortCwd(peer.cwd)}`),
+                ]))),
+      ].filter(Boolean))
+    }
+
+    return h('div', { class: 'cr-watch' }, [
+      h('div', { class: 'cr-watch-bar' }, [
+        h('span', { class: 'cr-watch-live' }, s.watchingLabel(state.watching.name)),
+        h('button', {
+          class: 'cr-btn cr-btn-small',
+          onClick: () => mirror.stop(),
+        }, s.watchStop),
+      ]),
+      state.error ? h('div', { class: 'cr-watch-error' }, state.error) : null,
+      h('div', { class: 'cr-transcript cr-transcript-mirror' },
+        state.messages.length
+          ? state.messages.map((m, i) =>
+              h('div', { class: `cr-msg cr-msg-${m.role}`, key: i }, m.text))
+          : h('div', { class: 'cr-empty' }, s.watchLoading)),
+    ].filter(Boolean))
+  }
+
   function renderComposer(conversation: Conversation) {
     const s = t()
     const { state } = conversation
@@ -428,10 +535,20 @@ export function activate(ctx: PluginContext): PluginExports {
       props: ['paneId', 'workspaceId', 'isVisible', 'isFocused'],
       setup(props: any) {
         const conversation = conversationFor(props)
+        const paneKey = keyFor(props)
         return () => {
+          const mode = viewModes.get(paneKey) ?? 'chat'
+          // Watching another session is read-only and needs no working claude,
+          // so it stays available even when the probe blocks the chat view.
+          if (mode === 'watch') {
+            return h('div', { class: 'cr-root' }, [
+              renderHeader(conversation, paneKey),
+              renderWatch(props),
+            ])
+          }
           const blocker = ready.value ? null : renderBlocker()
           return h('div', { class: 'cr-root' }, [
-            renderHeader(conversation),
+            renderHeader(conversation, paneKey),
             blocker ?? h('div', { class: 'cr-body' }, [
               renderPicker(conversation),
               renderTools(conversation),
@@ -447,12 +564,19 @@ export function activate(ctx: PluginContext): PluginExports {
       // Stop polling, but leave running turns alone: a turn outliving its pane
       // is the whole point of running it as a managed process.
       for (const conversation of conversations.values()) conversation.dispose()
+      for (const mirror of mirrors.values()) mirror.dispose()
       conversations.clear()
+      mirrors.clear()
     },
   }
 }
 
 /** A compact, readable rendering of a tool's arguments for the approval card. */
+function shortCwd(cwd: string): string {
+  const parts = cwd.replace(/[\/]+$/, '').split(/[\/]/)
+  return parts.slice(-2).join('/') || cwd
+}
+
 function summariseInput(input: unknown): string {
   if (input === null || input === undefined) return ''
   if (typeof input === 'string') return input
