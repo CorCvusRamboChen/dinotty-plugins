@@ -44,6 +44,12 @@ interface Strings {
   deny: string
   toolsLabel: (allowed: number, total: number) => string
   toolsHint: string
+  attach: string
+  attachHint: string
+  attachEmpty: string
+  attachLoading: string
+  attachLive: string
+  ago: (ms: number) => string
 }
 
 // The set `claude --permission-mode` accepts. bypassPermissions is deliberately
@@ -77,6 +83,12 @@ const STRINGS: Record<Locale, Strings> = {
     deny: 'Deny',
     toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
     toolsHint: 'Checked tools run without asking.',
+    attach: 'Continue a session',
+    attachHint: 'Pick up a conversation started anywhere on this machine — the CLI, Claude Desktop, or an earlier pane.',
+    attachEmpty: 'No sessions found for this working directory.',
+    attachLoading: 'Looking for sessions…',
+    attachLive: 'If that session is still open elsewhere, continuing it here will fork its transcript. Close it there first.',
+    ago: ms => relativeTime(ms, 'en'),
   },
   zh: {
     title: 'Claude Remote',
@@ -104,6 +116,12 @@ const STRINGS: Record<Locale, Strings> = {
     deny: '拒绝',
     toolsLabel: (allowed, total) => `工具 ${allowed}/${total}`,
     toolsHint: '勾选的工具不再询问。',
+    attach: '接入会话',
+    attachHint: '接上这台机器上已有的对话 —— 命令行、Claude Desktop，或之前的面板都行。',
+    attachEmpty: '这个工作目录下没有找到会话。',
+    attachLoading: '正在查找会话…',
+    attachLive: '如果那个会话还在别处开着，在这里接上会让记录分叉。请先在那边关掉。',
+    ago: ms => relativeTime(ms, 'zh'),
   },
 }
 
@@ -227,7 +245,19 @@ export function activate(ctx: PluginContext): PluginExports {
       state.lastCostUsd !== null
         ? h('span', { class: 'cr-header-meta' }, s.costLabel(state.lastCostUsd))
         : null,
+      state.attachedTitle
+        ? h('span', { class: 'cr-header-meta cr-header-attached', title: state.attachedTitle },
+            state.attachedTitle)
+        : null,
       h('span', { class: 'cr-header-spacer' }),
+      h('button', {
+        class: 'cr-btn cr-btn-small' + (state.pickerOpen ? ' cr-btn-on' : ''),
+        disabled: state.sending,
+        onClick: () => {
+          state.pickerOpen = !state.pickerOpen
+          if (state.pickerOpen) void conversation.refreshSessions()
+        },
+      }, s.attach),
       state.sessionId && !state.sending
         ? h('button', { class: 'cr-btn cr-btn-small', onClick: () => conversation.reset() }, s.reset)
         : null,
@@ -296,6 +326,31 @@ export function activate(ctx: PluginContext): PluginExports {
         }, s.allow),
       ]),
     ].filter(Boolean))
+  }
+
+  function renderPicker(conversation: Conversation) {
+    const s = t()
+    const { state } = conversation
+    if (!state.pickerOpen) return null
+    return h('div', { class: 'cr-picker' }, [
+      h('div', { class: 'cr-picker-hint' }, s.attachHint),
+      h('div', { class: 'cr-picker-warn' }, s.attachLive),
+      state.sessionsLoading && !state.sessions.length
+        ? h('div', { class: 'cr-picker-empty' }, s.attachLoading)
+        : !state.sessions.length
+          ? h('div', { class: 'cr-picker-empty' }, s.attachEmpty)
+          : h('div', { class: 'cr-picker-list' }, state.sessions.map(session =>
+              h('button', {
+                class: 'cr-picker-row' + (session.id === state.sessionId ? ' cr-picker-row-current' : ''),
+                key: session.id,
+                disabled: state.sending,
+                onClick: () => void conversation.attachSession(session),
+              }, [
+                h('span', { class: 'cr-picker-title' }, session.title),
+                h('span', { class: 'cr-picker-meta' },
+                  `${s.ago(session.updatedAt)} · ${formatSize(session.sizeBytes)}`),
+              ]))),
+    ])
   }
 
   function renderTools(conversation: Conversation) {
@@ -378,6 +433,7 @@ export function activate(ctx: PluginContext): PluginExports {
           return h('div', { class: 'cr-root' }, [
             renderHeader(conversation),
             blocker ?? h('div', { class: 'cr-body' }, [
+              renderPicker(conversation),
               renderTools(conversation),
               renderTranscript(conversation),
               renderApproval(conversation),
@@ -409,4 +465,22 @@ function summariseInput(input: unknown): string {
   } catch {
     return String(input)
   }
+}
+
+/** Coarse relative time; the picker only needs "how stale is this". */
+function relativeTime(epochMs: number, locale: 'en' | 'zh'): string {
+  const minutes = Math.max(0, Math.round((Date.now() - epochMs) / 60000))
+  const zh = locale === 'zh'
+  if (minutes < 1) return zh ? '刚刚' : 'just now'
+  if (minutes < 60) return zh ? `${minutes} 分钟前` : `${minutes}m ago`
+  const hours = Math.round(minutes / 60)
+  if (hours < 24) return zh ? `${hours} 小时前` : `${hours}h ago`
+  const days = Math.round(hours / 24)
+  return zh ? `${days} 天前` : `${days}d ago`
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }

@@ -172,6 +172,21 @@ No Agent SDK dependency is involved. The SDK's `canUseTool` is the other way to
 do this, and it would mean bundling a second copy of the harness; this keeps the
 plugin driving the `claude` the user already has.
 
+### Continuing an existing session
+
+Claude Code keeps one JSONL transcript per session under
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, where the encoding
+replaces every non-`[a-zA-Z0-9]` character with a dash. The sidecar lists that
+directory, reads only the head of each file for a title, and the pane resumes
+the chosen id with `--resume`.
+
+Only the id is adopted. The history stays in Claude's own transcript and comes
+back into context on the next turn, so the pane does not have to reproduce it.
+
+The list is scoped to the pane's working directory: before Claude Code v2.1.223
+`--resume` only finds an id inside the current project, so showing sessions from
+elsewhere would offer rows that cannot be resumed from here.
+
 ### Interrupting
 
 `ctx.process.stop(pid)` triggers the `stdinLease` protocol: the sidecar receives
@@ -228,7 +243,12 @@ the sidecar module drags `node:child_process` into the browser bundle.
 - [x] **M4** — permission-mode selector and a per-pane tool allowlist, built
       from the tool list `system/init` reports
 - [x] **M4b** — per-call Allow / Deny, through a bundled MCP permission server
-- [ ] **M5** — take over a Remote Control session this plugin did not start.
+- [x] **M4c** — continue a session started anywhere else on the machine (the
+      CLI, Claude Desktop, an earlier pane) by picking it from a list and
+      resuming it. This is a *handoff*, not a live join: continuing a session
+      that is still open elsewhere forks its transcript, and the picker says so.
+- [ ] **M5** — *live* takeover of a session that is still running elsewhere,
+      with both surfaces attached at once.
       This is the plan's M5 and the only part that needs the reverse-engineered
       protocol; nothing here implements it yet.
 

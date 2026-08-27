@@ -12,8 +12,9 @@
 import { probeClaude } from './claude'
 import { runTurn } from './turn'
 import { runPermissionServer } from './mcp-permission'
+import { listSessions } from './sessions'
 
-const SUBCOMMANDS = ['probe', 'turn', 'mcp-permission', 'help'] as const
+const SUBCOMMANDS = ['probe', 'turn', 'sessions', 'mcp-permission', 'help'] as const
 
 function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n')
@@ -39,6 +40,19 @@ async function main(): Promise<void> {
     case 'probe':
       code = await cmdProbe()
       break
+    case 'sessions': {
+      // The pane cannot read the transcript store itself: plugin JS has no
+      // filesystem reach beyond ctx.workspace, and this lives under ~/.claude.
+      const cwd = rest[0]
+      if (!cwd) {
+        emit({ type: 'error', error: 'usage: sessions <cwd>' })
+        code = 1
+        break
+      }
+      emit({ type: 'sessions', sessions: listSessions(cwd) })
+      code = 0
+      break
+    }
     case 'turn': {
       const key = rest[0]
       if (!key) {

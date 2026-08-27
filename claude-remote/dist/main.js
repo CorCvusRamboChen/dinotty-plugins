@@ -26,7 +26,11 @@ function createConversation(ctx, paneKey, onError) {
     allowedTools: [],
     perCallApproval: false,
     pendingApproval: null,
-    reattached: false
+    reattached: false,
+    sessions: [],
+    sessionsLoading: false,
+    pickerOpen: false,
+    attachedTitle: null
   });
   const sessionKey = `session-${paneKey.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
   let activeTurnId = null;
@@ -144,6 +148,7 @@ function createConversation(ctx, paneKey, onError) {
     if (saved.history?.length) state.history = saved.history;
     if (saved.allowedTools) state.allowedTools = saved.allowedTools;
     if (saved.perCallApproval !== void 0) state.perCallApproval = saved.perCallApproval;
+    if (saved.attachedTitle) state.attachedTitle = saved.attachedTitle;
     if (saved.activeTurnId) {
       state.reattached = true;
       follow(saved.activeTurnId);
@@ -215,6 +220,60 @@ function createConversation(ctx, paneKey, onError) {
     state.perCallApproval = enabled;
     void saveSession({ perCallApproval: enabled });
   }
+  async function refreshSessions() {
+    if (state.sessionsLoading) return;
+    state.sessionsLoading = true;
+    try {
+      const cwd = ctx.terminal.activeCwd();
+      if (!cwd) {
+        onError("no working directory yet \u2014 open a terminal tab first");
+        state.sessions = [];
+        return;
+      }
+      const res = await ctx.exec.run(["sessions", cwd], { timeout: 2e4 });
+      if (res.code !== 0) {
+        onError(res.stderr.trim() || `sidecar exited with code ${res.code}`);
+        return;
+      }
+      for (const line of res.stdout.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed?.type === "sessions") {
+            state.sessions = parsed.sessions;
+            return;
+          }
+          if (parsed?.type === "error") {
+            onError(String(parsed.error));
+            return;
+          }
+        } catch {
+        }
+      }
+    } catch (e) {
+      onError(describe(e));
+    } finally {
+      state.sessionsLoading = false;
+    }
+  }
+  async function attachSession(session) {
+    if (state.sending) return;
+    state.sessionId = session.id;
+    state.attachedTitle = session.title;
+    state.pickerOpen = false;
+    state.history = [];
+    state.live = [];
+    state.lastCostUsd = null;
+    state.history.push({
+      role: "system",
+      text: `Continuing "${session.title}" (${session.id.slice(0, 8)}). Earlier messages stay in Claude's own transcript; they are not reprinted here.`
+    });
+    await saveSession({
+      sessionId: session.id,
+      attachedTitle: session.title,
+      history: state.history
+    });
+  }
   function reset() {
     if (pollTimer) {
       clearTimeout(pollTimer);
@@ -229,6 +288,7 @@ function createConversation(ctx, paneKey, onError) {
     state.sessionId = null;
     state.model = null;
     state.lastCostUsd = null;
+    state.attachedTitle = null;
     void ctx.storage.delete(sessionKey).catch(() => {
     });
   }
@@ -246,6 +306,8 @@ function createConversation(ctx, paneKey, onError) {
     decide,
     setAllowedTools,
     setPerCallApproval,
+    refreshSessions,
+    attachSession,
     reset,
     restore,
     dispose
@@ -295,7 +357,13 @@ var STRINGS = {
     allow: "Allow",
     deny: "Deny",
     toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
-    toolsHint: "Checked tools run without asking."
+    toolsHint: "Checked tools run without asking.",
+    attach: "Continue a session",
+    attachHint: "Pick up a conversation started anywhere on this machine \u2014 the CLI, Claude Desktop, or an earlier pane.",
+    attachEmpty: "No sessions found for this working directory.",
+    attachLoading: "Looking for sessions\u2026",
+    attachLive: "If that session is still open elsewhere, continuing it here will fork its transcript. Close it there first.",
+    ago: (ms) => relativeTime(ms, "en")
   },
   zh: {
     title: "Claude Remote",
@@ -322,7 +390,13 @@ var STRINGS = {
     allow: "\u5141\u8BB8",
     deny: "\u62D2\u7EDD",
     toolsLabel: (allowed, total) => `\u5DE5\u5177 ${allowed}/${total}`,
-    toolsHint: "\u52FE\u9009\u7684\u5DE5\u5177\u4E0D\u518D\u8BE2\u95EE\u3002"
+    toolsHint: "\u52FE\u9009\u7684\u5DE5\u5177\u4E0D\u518D\u8BE2\u95EE\u3002",
+    attach: "\u63A5\u5165\u4F1A\u8BDD",
+    attachHint: "\u63A5\u4E0A\u8FD9\u53F0\u673A\u5668\u4E0A\u5DF2\u6709\u7684\u5BF9\u8BDD \u2014\u2014 \u547D\u4EE4\u884C\u3001Claude Desktop\uFF0C\u6216\u4E4B\u524D\u7684\u9762\u677F\u90FD\u884C\u3002",
+    attachEmpty: "\u8FD9\u4E2A\u5DE5\u4F5C\u76EE\u5F55\u4E0B\u6CA1\u6709\u627E\u5230\u4F1A\u8BDD\u3002",
+    attachLoading: "\u6B63\u5728\u67E5\u627E\u4F1A\u8BDD\u2026",
+    attachLive: "\u5982\u679C\u90A3\u4E2A\u4F1A\u8BDD\u8FD8\u5728\u522B\u5904\u5F00\u7740\uFF0C\u5728\u8FD9\u91CC\u63A5\u4E0A\u4F1A\u8BA9\u8BB0\u5F55\u5206\u53C9\u3002\u8BF7\u5148\u5728\u90A3\u8FB9\u5173\u6389\u3002",
+    ago: (ms) => relativeTime(ms, "zh")
   }
 };
 function activate(ctx) {
@@ -438,7 +512,20 @@ function activate(ctx) {
       state.model ? h("span", { class: "cr-header-meta" }, state.model) : null,
       state.sessionId ? h("span", { class: "cr-header-meta" }, s.sessionLabel(state.sessionId)) : null,
       state.lastCostUsd !== null ? h("span", { class: "cr-header-meta" }, s.costLabel(state.lastCostUsd)) : null,
+      state.attachedTitle ? h(
+        "span",
+        { class: "cr-header-meta cr-header-attached", title: state.attachedTitle },
+        state.attachedTitle
+      ) : null,
       h("span", { class: "cr-header-spacer" }),
+      h("button", {
+        class: "cr-btn cr-btn-small" + (state.pickerOpen ? " cr-btn-on" : ""),
+        disabled: state.sending,
+        onClick: () => {
+          state.pickerOpen = !state.pickerOpen;
+          if (state.pickerOpen) void conversation.refreshSessions();
+        }
+      }, s.attach),
       state.sessionId && !state.sending ? h("button", { class: "cr-btn cr-btn-small", onClick: () => conversation.reset() }, s.reset) : null,
       p && p.found && !p.error && p.reportsCapabilities === false ? h("span", { class: "cr-header-warn", title: s.noCapabilities }, "!") : null
     ].filter(Boolean));
@@ -492,6 +579,28 @@ function activate(ctx) {
         }, s.allow)
       ])
     ].filter(Boolean));
+  }
+  function renderPicker(conversation) {
+    const s = t();
+    const { state } = conversation;
+    if (!state.pickerOpen) return null;
+    return h("div", { class: "cr-picker" }, [
+      h("div", { class: "cr-picker-hint" }, s.attachHint),
+      h("div", { class: "cr-picker-warn" }, s.attachLive),
+      state.sessionsLoading && !state.sessions.length ? h("div", { class: "cr-picker-empty" }, s.attachLoading) : !state.sessions.length ? h("div", { class: "cr-picker-empty" }, s.attachEmpty) : h("div", { class: "cr-picker-list" }, state.sessions.map((session) => h("button", {
+        class: "cr-picker-row" + (session.id === state.sessionId ? " cr-picker-row-current" : ""),
+        key: session.id,
+        disabled: state.sending,
+        onClick: () => void conversation.attachSession(session)
+      }, [
+        h("span", { class: "cr-picker-title" }, session.title),
+        h(
+          "span",
+          { class: "cr-picker-meta" },
+          `${s.ago(session.updatedAt)} \xB7 ${formatSize(session.sizeBytes)}`
+        )
+      ])))
+    ]);
   }
   function renderTools(conversation) {
     const s = t();
@@ -571,6 +680,7 @@ function activate(ctx) {
           return h("div", { class: "cr-root" }, [
             renderHeader(conversation),
             blocker ?? h("div", { class: "cr-body" }, [
+              renderPicker(conversation),
               renderTools(conversation),
               renderTranscript(conversation),
               renderApproval(conversation),
@@ -596,6 +706,21 @@ function summariseInput(input) {
   } catch {
     return String(input);
   }
+}
+function relativeTime(epochMs, locale) {
+  const minutes = Math.max(0, Math.round((Date.now() - epochMs) / 6e4));
+  const zh = locale === "zh";
+  if (minutes < 1) return zh ? "\u521A\u521A" : "just now";
+  if (minutes < 60) return zh ? `${minutes} \u5206\u949F\u524D` : `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return zh ? `${hours} \u5C0F\u65F6\u524D` : `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  return zh ? `${days} \u5929\u524D` : `${days}d ago`;
+}
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 export {
   activate

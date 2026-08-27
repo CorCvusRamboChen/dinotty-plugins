@@ -714,8 +714,98 @@ function describe(e) {
   return e instanceof Error ? e.message : String(e);
 }
 
+// src/sessions.ts
+var fs4 = __toESM(require("node:fs"));
+var os2 = __toESM(require("node:os"));
+var path4 = __toESM(require("node:path"));
+function encodeProjectDir(cwd) {
+  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
+}
+function projectsRoot() {
+  return path4.join(os2.homedir(), ".claude", "projects");
+}
+var HEAD_BYTES = 128 * 1024;
+var TITLE_MAX = 100;
+function readHead(file, bytes) {
+  const handle = fs4.openSync(file, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const read = fs4.readSync(handle, buffer, 0, bytes, 0);
+    return buffer.subarray(0, read).toString("utf-8");
+  } finally {
+    fs4.closeSync(handle);
+  }
+}
+function userText(entry) {
+  const content = entry?.message?.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    const text = content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("");
+    return text || null;
+  }
+  return null;
+}
+function condense(text) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX)}\u2026` : flat;
+}
+function summarise(file, id) {
+  let stat;
+  try {
+    stat = fs4.statSync(file);
+  } catch {
+    return null;
+  }
+  let customTitle = null;
+  let firstPrompt = null;
+  let cwd = null;
+  let gitBranch = null;
+  let version = null;
+  try {
+    for (const line of readHead(file, HEAD_BYTES).split("\n")) {
+      if (!line.trim()) continue;
+      let entry;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
+        customTitle = entry.customTitle;
+      }
+      if (!cwd && typeof entry.cwd === "string") cwd = entry.cwd;
+      if (!gitBranch && typeof entry.gitBranch === "string") gitBranch = entry.gitBranch;
+      if (!version && typeof entry.version === "string") version = entry.version;
+      if (!firstPrompt && entry.type === "user") {
+        const text = userText(entry);
+        if (text) firstPrompt = text;
+      }
+    }
+  } catch {
+  }
+  return {
+    id,
+    title: condense(customTitle || firstPrompt || "(untitled session)"),
+    updatedAt: stat.mtimeMs,
+    sizeBytes: stat.size,
+    cwd,
+    gitBranch,
+    version
+  };
+}
+function listSessions(cwd) {
+  const dir = path4.join(projectsRoot(), encodeProjectDir(cwd));
+  let names;
+  try {
+    names = fs4.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names.filter((name) => name.endsWith(".jsonl")).map((name) => summarise(path4.join(dir, name), name.slice(0, -".jsonl".length))).filter((s) => s !== null).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 // src/cli.ts
-var SUBCOMMANDS = ["probe", "turn", "mcp-permission", "help"];
+var SUBCOMMANDS = ["probe", "turn", "sessions", "mcp-permission", "help"];
 function emit2(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
 }
@@ -735,6 +825,17 @@ async function main() {
     case "probe":
       code = await cmdProbe();
       break;
+    case "sessions": {
+      const cwd = rest[0];
+      if (!cwd) {
+        emit2({ type: "error", error: "usage: sessions <cwd>" });
+        code = 1;
+        break;
+      }
+      emit2({ type: "sessions", sessions: listSessions(cwd) });
+      code = 0;
+      break;
+    }
     case "turn": {
       const key = rest[0];
       if (!key) {

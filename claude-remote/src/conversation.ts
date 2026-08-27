@@ -1,6 +1,7 @@
 import type { PluginContext } from '../../plugin-api/index'
 import type { Message, TurnSnapshot } from './reduce'
 import type { ApprovalRequest } from './mcp-permission'
+import type { SessionSummary } from './sessions'
 
 /**
  * Browser-side conversation state for one pane.
@@ -18,7 +19,7 @@ import type { ApprovalRequest } from './mcp-permission'
  * turn back up is just resuming the poll, from any device.
  */
 
-export type { Message, TurnSnapshot, ApprovalRequest }
+export type { Message, TurnSnapshot, ApprovalRequest, SessionSummary }
 
 export interface ConversationState {
   /** Completed turns, oldest first. */
@@ -41,6 +42,13 @@ export interface ConversationState {
   pendingApproval: ApprovalRequest | null
   /** True when this pane attached to a turn it did not start. */
   reattached: boolean
+  /** Sessions on this machine that can be picked up, newest first. */
+  sessions: SessionSummary[]
+  sessionsLoading: boolean
+  /** Whether the session picker is open in this pane. */
+  pickerOpen: boolean
+  /** Set when the session was adopted rather than started here. */
+  attachedTitle: string | null
 }
 
 export interface Conversation {
@@ -48,6 +56,8 @@ export interface Conversation {
   send(prompt: string): Promise<void>
   interrupt(): Promise<void>
   decide(behavior: 'allow' | 'deny'): Promise<void>
+  refreshSessions(): Promise<void>
+  attachSession(session: SessionSummary): Promise<void>
   setAllowedTools(tools: string[]): void
   setPerCallApproval(enabled: boolean): void
   reset(): void
@@ -61,6 +71,7 @@ interface PersistedSession {
   history?: Message[]
   allowedTools?: string[]
   perCallApproval?: boolean
+  attachedTitle?: string
   /** Set while a turn is in flight, so a reload can find it again. */
   activeTurnId?: string
 }
@@ -103,6 +114,10 @@ export function createConversation(
     perCallApproval: false,
     pendingApproval: null,
     reattached: false,
+    sessions: [],
+    sessionsLoading: false,
+    pickerOpen: false,
+    attachedTitle: null,
   }) as ConversationState
 
   // Keyed by pane so two panes are two conversations, and so a reopened pane
@@ -243,6 +258,7 @@ export function createConversation(
     if (saved.history?.length) state.history = saved.history
     if (saved.allowedTools) state.allowedTools = saved.allowedTools
     if (saved.perCallApproval !== undefined) state.perCallApproval = saved.perCallApproval
+    if (saved.attachedTitle) state.attachedTitle = saved.attachedTitle
 
     // A turn was in flight when this pane last went away. If its process is
     // still running, or it left a finished snapshot we never consumed, pick it
@@ -350,6 +366,68 @@ export function createConversation(
     void saveSession({ perCallApproval: enabled })
   }
 
+  /**
+   * List the sessions already on this machine.
+   *
+   * The pane cannot read `~/.claude/projects` itself, so this goes through the
+   * sidecar like everything else that touches the filesystem.
+   */
+  async function refreshSessions(): Promise<void> {
+    if (state.sessionsLoading) return
+    state.sessionsLoading = true
+    try {
+      const cwd = ctx.terminal.activeCwd()
+      if (!cwd) {
+        onError('no working directory yet — open a terminal tab first')
+        state.sessions = []
+        return
+      }
+      const res = await ctx.exec.run(['sessions', cwd], { timeout: 20_000 })
+      if (res.code !== 0) {
+        onError(res.stderr.trim() || `sidecar exited with code ${res.code}`)
+        return
+      }
+      for (const line of res.stdout.split('\n')) {
+        if (!line.trim()) continue
+        try {
+          const parsed = JSON.parse(line)
+          if (parsed?.type === 'sessions') { state.sessions = parsed.sessions; return }
+          if (parsed?.type === 'error') { onError(String(parsed.error)); return }
+        } catch { /* not our line */ }
+      }
+    } catch (e) {
+      onError(describe(e))
+    } finally {
+      state.sessionsLoading = false
+    }
+  }
+
+  /**
+   * Continue an existing session in this pane.
+   *
+   * Only the id is adopted: the transcript stays where Claude keeps it, and the
+   * next send passes `--resume`, so the full history comes back into context
+   * without this pane having to reproduce it.
+   */
+  async function attachSession(session: SessionSummary): Promise<void> {
+    if (state.sending) return
+    state.sessionId = session.id
+    state.attachedTitle = session.title
+    state.pickerOpen = false
+    state.history = []
+    state.live = []
+    state.lastCostUsd = null
+    state.history.push({
+      role: 'system',
+      text: `Continuing "${session.title}" (${session.id.slice(0, 8)}). Earlier messages stay in Claude's own transcript; they are not reprinted here.`,
+    })
+    await saveSession({
+      sessionId: session.id,
+      attachedTitle: session.title,
+      history: state.history,
+    })
+  }
+
   function reset(): void {
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
     activeTurnId = null
@@ -361,6 +439,7 @@ export function createConversation(
     state.sessionId = null
     state.model = null
     state.lastCostUsd = null
+    state.attachedTitle = null
     void ctx.storage.delete(sessionKey).catch(() => { /* nothing stored yet */ })
   }
 
@@ -372,7 +451,7 @@ export function createConversation(
 
   return {
     state, send, interrupt, decide, setAllowedTools, setPerCallApproval,
-    reset, restore, dispose,
+    refreshSessions, attachSession, reset, restore, dispose,
   }
 }
 
