@@ -1,0 +1,30 @@
+{
+  "id": "claude-remote",
+  "name": "Claude Remote",
+  "version": "0.1.0",
+  "minAppVersion": "0.19.0",
+  "description": "Interactive Claude Code pane with streaming output, interrupt and permission controls",
+  "description_zh": "可交互的 Claude Code 面板 — 流式输出、中断与权限控制",
+  "category": "ai",
+  "icon": "message-square",
+  "entry": "./dist/main.js",
+  "styles": "./styles.css",
+  "bin": {
+    "mode": "cli",
+    "entry": "dist/cli-wrapper",
+    "entries": {
+      "windows-x86_64": "dist/cli-wrapper.exe"
+    },
+    "lifecycle": {
+      "scope": "host",
+      "stdinLease": true,
+      "shutdownDeadlineMs": 10000,
+      "forceKillAfterMs": 15000
+    }
+  },
+  "permissions": ["native.execute", "process.long-running"],
+  "commands": [
+    { "id": "claude-remote.open", "title": "Open Claude Remote" },
+    { "id": "claude-remote.interrupt", "title": "Interrupt Claude" }
+  ]
+}

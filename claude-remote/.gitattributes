@@ -1,0 +1,4 @@
+dist/cli-wrapper text eol=lf
+dist/cli text eol=lf
+dist/cli-wrapper.exe binary
+*.ndjson text eol=lf

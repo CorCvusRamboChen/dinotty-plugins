@@ -1,0 +1,52 @@
+#!/bin/bash
+# POSIX launcher for the claude-remote sidecar.
+#
+# dinotty runs the file named by `bin.entry`; this locates a usable Node and
+# hands off to the bundled CLI. Windows uses dist/cli-wrapper.exe instead
+# (CreateProcess cannot run a shebang script).
+
+set -euo pipefail
+
+find_node() {
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return
+  fi
+
+  local home="${HOME:-/root}"
+
+  # nvm's default alias, then any installed version, newest first.
+  local nvm_default="$home/.nvm/alias/default"
+  if [[ -f "$nvm_default" ]]; then
+    local version
+    version="$(cat "$nvm_default" 2>/dev/null || true)"
+    if [[ -n "$version" && -x "$home/.nvm/versions/node/$version/bin/node" ]]; then
+      echo "$home/.nvm/versions/node/$version/bin/node"
+      return
+    fi
+  fi
+  if [[ -d "$home/.nvm/versions/node" ]]; then
+    local candidate
+    candidate="$(ls -1 "$home/.nvm/versions/node" 2>/dev/null | sort -Vr | head -n1 || true)"
+    if [[ -n "$candidate" && -x "$home/.nvm/versions/node/$candidate/bin/node" ]]; then
+      echo "$home/.nvm/versions/node/$candidate/bin/node"
+      return
+    fi
+  fi
+
+  for candidate in /usr/local/bin/node /opt/homebrew/bin/node /usr/bin/node; do
+    [[ -x "$candidate" ]] && { echo "$candidate"; return; }
+  done
+
+  echo "node"
+}
+
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+cli_script="$script_dir/cli"
+
+if [[ ! -f "$cli_script" ]]; then
+  echo "claude-remote launcher: CLI bundle not found at $cli_script" >&2
+  exit 1
+fi
+
+exec "$(find_node)" "$cli_script" "$@"

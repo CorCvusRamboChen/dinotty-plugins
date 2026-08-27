@@ -1,0 +1,23 @@
+{
+  "name": "claude-remote",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "description": "Interactive Claude Code pane for dinotty",
+  "license": "MIT",
+  "scripts": {
+    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=cjs --outfile=dist/cli --target=node18 --banner:js=\"#!/usr/bin/env node\"",
+    "build:ui": "esbuild src/ui.ts --bundle --format=esm --platform=browser --outfile=dist/main.js",
+    "build:windows-launcher": "rustc --edition=2021 -C opt-level=s -C strip=symbols -o dist/cli-wrapper.exe native/windows-launcher.rs",
+    "set:cli-executable": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli', 0o755)\"",
+    "build": "npm run build:cli && npm run build:ui && npm run build:protocol && npm run set:cli-executable",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build:protocol && node --test test/*.test.mjs",
+    "build:protocol": "esbuild src/protocol.ts --bundle --format=esm --outfile=dist/protocol.mjs --platform=neutral"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.28.1",
+    "typescript": "~5.7.0"
+  }
+}

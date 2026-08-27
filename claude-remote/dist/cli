@@ -1,0 +1,183 @@
+#!/usr/bin/env node
+"use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+
+// src/claude.ts
+var import_node_child_process = require("node:child_process");
+var import_node_util = require("node:util");
+var fs = __toESM(require("node:fs"));
+var path = __toESM(require("node:path"));
+var os = __toESM(require("node:os"));
+var execFileAsync = (0, import_node_util.promisify)(import_node_child_process.execFile);
+var HOME = os.homedir();
+var IS_WINDOWS = process.platform === "win32";
+var MIN_CLAUDE_VERSION = "2.0.0";
+var CAPABILITIES_SINCE = "2.1.205";
+var OVERRIDE_ENV = "CLAUDE_REMOTE_CLAUDE_BIN";
+async function locateClaude() {
+  const override = process.env[OVERRIDE_ENV];
+  if (override && isExecutableFile(override)) {
+    return { bin: override, source: "override" };
+  }
+  const fromPath = await lookupOnPath();
+  if (fromPath) return { bin: fromPath, source: "path" };
+  for (const candidate of knownLocations()) {
+    if (isExecutableFile(candidate)) return { bin: candidate, source: "known-location" };
+  }
+  return null;
+}
+async function lookupOnPath() {
+  const finder = IS_WINDOWS ? "where.exe" : "which";
+  try {
+    const { stdout } = await execFileAsync(finder, ["claude"], { timeout: 5e3 });
+    const hits = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!hits.length) return null;
+    if (!IS_WINDOWS) return hits[0];
+    const preferred = [".cmd", ".bat", ".exe", ".ps1"];
+    for (const ext of preferred) {
+      const hit = hits.find((h) => h.toLowerCase().endsWith(ext));
+      if (hit) return hit;
+    }
+    return hits.find((h) => path.extname(h)) ?? null;
+  } catch {
+    return null;
+  }
+}
+function knownLocations() {
+  const out = [];
+  if (IS_WINDOWS) {
+    const appData = process.env.APPDATA;
+    if (appData) out.push(path.join(appData, "npm", "claude.cmd"));
+    const localAppData = process.env.LOCALAPPDATA;
+    if (localAppData) out.push(path.join(localAppData, "Programs", "claude", "claude.exe"));
+  } else {
+    out.push(path.join(HOME, ".claude", "local", "claude"));
+    out.push("/usr/local/bin/claude");
+    out.push("/opt/homebrew/bin/claude");
+    const nvmVersions = path.join(HOME, ".nvm", "versions", "node");
+    const defaultAlias = path.join(HOME, ".nvm", "alias", "default");
+    try {
+      const version = fs.readFileSync(defaultAlias, "utf-8").trim();
+      if (version) out.push(path.join(nvmVersions, version, "bin", "claude"));
+    } catch {
+    }
+    try {
+      for (const v of fs.readdirSync(nvmVersions).sort().reverse()) {
+        out.push(path.join(nvmVersions, v, "bin", "claude"));
+      }
+    } catch {
+    }
+  }
+  return out;
+}
+function isExecutableFile(candidate) {
+  try {
+    return fs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+async function probeClaude() {
+  const located = await locateClaude();
+  if (!located) {
+    return { found: false, minVersion: MIN_CLAUDE_VERSION, error: "claude executable not found" };
+  }
+  try {
+    const { stdout } = await runClaude(located.bin, ["--version"], { timeout: 1e4 });
+    const version = stdout.trim().split(/\s+/)[0] ?? "";
+    return {
+      found: true,
+      bin: located.bin,
+      source: located.source,
+      version,
+      versionOk: compareVersions(version, MIN_CLAUDE_VERSION) >= 0,
+      reportsCapabilities: compareVersions(version, CAPABILITIES_SINCE) >= 0,
+      minVersion: MIN_CLAUDE_VERSION
+    };
+  } catch (e) {
+    return {
+      found: true,
+      bin: located.bin,
+      source: located.source,
+      minVersion: MIN_CLAUDE_VERSION,
+      error: e instanceof Error ? e.message : String(e)
+    };
+  }
+}
+function runClaude(bin, args, opts) {
+  if (IS_WINDOWS && isBatchFile(bin)) {
+    const comspec = process.env.ComSpec || "cmd.exe";
+    return execFileAsync(comspec, ["/d", "/s", "/c", bin, ...args], opts);
+  }
+  return execFileAsync(bin, args, opts);
+}
+function isBatchFile(bin) {
+  const ext = path.extname(bin).toLowerCase();
+  return ext === ".cmd" || ext === ".bat";
+}
+function compareVersions(a, b) {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+// src/cli.ts
+var SUBCOMMANDS = ["probe", "help"];
+function emit(value) {
+  process.stdout.write(JSON.stringify(value) + "\n");
+}
+async function cmdProbe() {
+  const probe = await probeClaude();
+  emit({ type: "probe", ...probe });
+  return 0;
+}
+function cmdHelp() {
+  emit({ type: "help", subcommands: SUBCOMMANDS });
+  return 0;
+}
+async function main() {
+  const [subcommand] = process.argv.slice(2);
+  let code;
+  switch (subcommand) {
+    case "probe":
+      code = await cmdProbe();
+      break;
+    case "help":
+    case void 0:
+      code = cmdHelp();
+      break;
+    default:
+      emit({ type: "error", error: `unknown subcommand: ${subcommand}`, subcommands: SUBCOMMANDS });
+      code = 1;
+  }
+  process.exitCode = code;
+}
+main().catch((e) => {
+  emit({ type: "error", error: e instanceof Error ? e.message : String(e) });
+  process.exitCode = 1;
+});
