@@ -217,6 +217,9 @@ export function activate(ctx: PluginContext): PluginExports {
     const { state } = conversation
     return h('div', { class: 'cr-header' }, [
       h('span', { class: 'cr-header-title' }, s.title),
+      // The detected CLI, shown from the moment the probe lands: before a turn
+      // runs it is the only evidence the environment was found at all.
+      p?.version ? h('span', { class: 'cr-header-meta' }, `claude ${p.version}`) : null,
       state.model ? h('span', { class: 'cr-header-meta' }, state.model) : null,
       state.sessionId
         ? h('span', { class: 'cr-header-meta' }, s.sessionLabel(state.sessionId))
