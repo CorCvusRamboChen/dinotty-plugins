@@ -3,8 +3,9 @@
 An interactive Claude Code pane for dinotty — streaming output, interrupt, and
 visible permission controls.
 
-> Status: milestone 1 (pane shell + environment probe). Sending a message lands
-> in milestone 2. See [Roadmap](#roadmap).
+> Status: sending, streaming, resume and interrupt work. Reconnecting to a turn
+> after the browser drops, and per-call permission prompts, do not. See
+> [Roadmap](#roadmap).
 
 ## How this differs from Session Browser
 
@@ -74,7 +75,8 @@ argv straight to `node dist/cli` with no command interpreter in between.
 
 ```
 pane component (browser, dist/main.js)
-        |  ctx.exec.run / ctx.exec.spawn
+        |  ctx.storage.set(turnId, {prompt, ...})   <- the prompt
+        |  ctx.exec.spawn(['turn', turnId, ...])    <- only the key
         v
 sidecar (node, dist/cli — launched via cli-wrapper[.exe])
         |  child process, prompt on stdin, NDJSON on stdout
@@ -92,11 +94,32 @@ recoverable.
 
 The prompt is written to the child's **stdin**, never argv. It is untrusted
 text, and on Windows an argv prompt would have to survive `cmd.exe` quoting.
+Verified against Claude Code 2.1.150: `claude -p` with no prompt argument takes
+the prompt from stdin.
+
+It does not travel in the sidecar's argv either. `ctx.exec.spawn` serialises its
+args into a WebSocket URL query string, so a long or multi-line prompt would run
+into URL length limits and encoding edge cases. The pane stages the whole
+request with `ctx.storage.set()` — which the host writes to
+`$DINOTTY_PLUGIN_DATA_DIR/<key>.json` — and passes only the key. The sidecar
+deletes that file as soon as it reads it.
+
+### Interrupting
+
+`SpawnHandle.kill()` closes the WebSocket, and the host responds by hard-killing
+the sidecar, which would leave the turn unfinished in the session transcript.
+The graceful path is `ctx.process.stop(pid)`: that triggers the `stdinLease`
+protocol, the sidecar receives `{"type":"shutdown"}` on stdin, and it sends
+SIGINT to Claude so the turn ends cleanly. The turn id is in the process args,
+which is how the right pid is found in `ctx.process.list()`.
+
+Windows has no POSIX signals, so interrupting there is still a hard kill and the
+pane says so rather than pretending the turn ended cleanly.
 
 ## Stream quirks this handles
 
-Captured from a real run against Claude Code 2.1.150 (see `fixtures/`), all
-three of which break the obvious implementation:
+Captured from real runs against Claude Code 2.1.150 (see `fixtures/`), all of
+which break the obvious implementation:
 
 1. **`system/init` is not the first line.** A `SessionStart` hook emits
    `system/hook_started` ahead of it.
@@ -105,28 +128,39 @@ three of which break the obvious implementation:
 3. **An API failure arrives as a successful-looking `result`.** The CLI exits 0
    with `subtype: "success"`, `is_error: true`, and `api_error_status`. You have
    to check `is_error` explicitly.
+4. **New `system` subtypes appear over time.** A live run produced
+   `system/status`, which the recorded fixture does not contain. Unknown event
+   types are ignored rather than treated as errors.
 
 `capabilities` in `system/init` requires Claude Code v2.1.205+. On older builds
 the field is simply absent, so feature detection falls back to comparing
 `claude_code_version`, and the pane header shows a warning marker.
 
+`crypto.randomUUID()` is not used anywhere: it is undefined on insecure origins,
+and reaching dinotty from a phone means plain `http://<lan-ip>:8999`.
+
 ## Roadmap
 
 - [x] **M1** — pane shell, environment probe, three explicit failure states
       (not installed / too old / cannot run)
-- [ ] **M2** — send a message, read `session_id` from `system/init`, resume with
-      `--resume`
-- [ ] **M3** — `--include-partial-messages` incremental rendering, reconnect
-      after disconnect, interrupt
-- [ ] **M4** — permission-mode and allowed-tools UI
-- [ ] **M5** — per-call Allow / Deny (needs the Agent SDK's `canUseTool`, or
-      `--permission-prompt-tool` if it can route prompts to stdout)
+- [x] **M2** — send a message, read `session_id` from `system/init`, resume with
+      `--resume`, session persisted per pane
+- [x] **M3a** — `--include-partial-messages` incremental rendering, interrupt via
+      the stdin lease
+- [ ] **M3b** — reconnect to a running turn after the browser drops. The sidecar
+      already survives (`lifecycle.scope: "host"`), but the pane cannot yet
+      re-attach to its output.
+- [x] **M4a** — permission-mode selector
+- [ ] **M4b** — allowed-tools UI
+- [ ] **M5** — per-call Allow / Deny. `claude -p` has no callback for this, so it
+      needs the Agent SDK's `canUseTool`, or `--permission-prompt-tool` if it can
+      route prompts to stdout.
 
 ## Development
 
 ```bash
 npm run typecheck
-npm test          # replays fixtures/*.ndjson through the stream parser
+npm test          # replays fixtures through the parser; exercises prompt staging
 npm run build
 ```
 

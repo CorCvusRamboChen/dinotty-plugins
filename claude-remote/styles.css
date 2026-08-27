@@ -160,3 +160,75 @@
   line-height: 1.5;
   word-break: break-word;
 }
+
+.plugin-host-claude-remote .cr-header-spacer {
+  flex: 1 1 auto;
+}
+
+.plugin-host-claude-remote .cr-btn-small {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.plugin-host-claude-remote .cr-btn-stop {
+  align-self: flex-end;
+  background: var(--danger);
+  border-color: var(--danger);
+  color: var(--bg);
+}
+
+.plugin-host-claude-remote .cr-select {
+  align-self: flex-end;
+  padding: 6px 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--fg);
+  font-size: 12px;
+  max-width: 8em;
+}
+
+.plugin-host-claude-remote .cr-msg-system {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  background: none;
+  padding: 2px 0;
+}
+
+/* A caret while tokens are still arriving, so a slow turn does not read as a
+   hung pane. */
+.plugin-host-claude-remote .cr-msg-streaming::after {
+  content: '';
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--fg-muted);
+  animation: cr-blink 1s steps(2, start) infinite;
+}
+
+@keyframes cr-blink {
+  to { visibility: hidden; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-host-claude-remote .cr-msg-streaming::after { animation: none; }
+}
+
+/* Phones: the composer needs room for a thumb, and the select must not squeeze
+   the textarea to nothing. */
+@media (max-width: 480px) {
+  .plugin-host-claude-remote .cr-composer {
+    flex-wrap: wrap;
+  }
+  .plugin-host-claude-remote .cr-input {
+    flex: 1 0 100%;
+    order: -1;
+  }
+  .plugin-host-claude-remote .cr-select {
+    max-width: none;
+    flex: 1 1 auto;
+  }
+}

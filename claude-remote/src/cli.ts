@@ -10,8 +10,9 @@
  */
 
 import { probeClaude } from './claude'
+import { runTurn } from './turn'
 
-const SUBCOMMANDS = ['probe', 'help'] as const
+const SUBCOMMANDS = ['probe', 'turn', 'help'] as const
 
 function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n')
@@ -31,12 +32,22 @@ function cmdHelp(): number {
 }
 
 async function main(): Promise<void> {
-  const [subcommand] = process.argv.slice(2)
+  const [subcommand, ...rest] = process.argv.slice(2)
   let code: number
   switch (subcommand) {
     case 'probe':
       code = await cmdProbe()
       break
+    case 'turn': {
+      const key = rest[0]
+      if (!key) {
+        emit({ type: 'error', error: 'usage: turn <staged-request-key> [--stdin-lease]' })
+        code = 1
+        break
+      }
+      code = await runTurn(key, rest.includes('--stdin-lease'))
+      break
+    }
     case 'help':
     case undefined:
       code = cmdHelp()

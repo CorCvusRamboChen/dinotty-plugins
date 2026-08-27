@@ -12,8 +12,9 @@
     "set:cli-executable": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli', 0o755)\"",
     "build": "npm run build:cli && npm run build:ui && npm run build:protocol && npm run set:cli-executable",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:protocol && node --test test/*.test.mjs",
-    "build:protocol": "esbuild src/protocol.ts --bundle --format=esm --outfile=dist/protocol.mjs --platform=neutral"
+    "test": "npm run build:protocol && npm run build:turn-test && node --test test/*.test.mjs",
+    "build:protocol": "esbuild src/protocol.ts --bundle --format=esm --outfile=dist/protocol.mjs --platform=neutral",
+    "build:turn-test": "esbuild src/turn.ts --bundle --platform=node --format=esm --outfile=dist/turn.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.1",
