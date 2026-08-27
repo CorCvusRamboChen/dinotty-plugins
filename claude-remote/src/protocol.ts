@@ -86,49 +86,6 @@ export interface UnknownEvent {
   [key: string]: unknown
 }
 
-/** A parsed line, or a parse failure we chose not to throw on. */
-export type ParsedLine =
-  | { ok: true; event: StreamEvent }
-  | { ok: false; raw: string; error: string }
-
-/**
- * Incremental NDJSON reader. `exec.spawn` hands us arbitrary chunks, so lines
- * split across chunk boundaries; anything that assumes chunk == line drops
- * events under load.
- */
-export class NdjsonReader {
-  private buffer = ''
-
-  push(chunk: string): ParsedLine[] {
-    this.buffer += chunk
-    const out: ParsedLine[] = []
-    let index: number
-    while ((index = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, index).replace(/\r$/, '')
-      this.buffer = this.buffer.slice(index + 1)
-      if (line.trim()) out.push(parseLine(line))
-    }
-    return out
-  }
-
-  /** Call on process exit: the last line may have no trailing newline. */
-  flush(): ParsedLine[] {
-    const line = this.buffer.replace(/\r$/, '')
-    this.buffer = ''
-    return line.trim() ? [parseLine(line)] : []
-  }
-}
-
-function parseLine(line: string): ParsedLine {
-  try {
-    return { ok: true, event: JSON.parse(line) as StreamEvent }
-  } catch (e) {
-    // A non-JSON line is usually a CLI warning on stderr-turned-stdout. Surface
-    // it rather than crashing the pane.
-    return { ok: false, raw: line, error: e instanceof Error ? e.message : String(e) }
-  }
-}
-
 export function isInit(e: StreamEvent): e is SystemInitEvent {
   return e.type === 'system' && (e as SystemGenericEvent).subtype === 'init'
 }

@@ -222,17 +222,21 @@ export async function runPermissionServer(turnId: string): Promise<number> {
         })
         break
 
-      case 'tools/call':
+      case 'tools/call': {
         if (request.params?.name !== TOOL_NAME) {
           replyError(request.id, -32602, `unknown tool: ${request.params?.name}`)
           break
         }
-        try {
-          reply(request.id, await handleToolCall(dataDir, turnId, request.params))
-        } catch (e) {
-          replyError(request.id, -32603, e instanceof Error ? e.message : String(e))
-        }
+        // Deliberately NOT awaited: an approval can sit unanswered for minutes,
+        // and awaiting here would stall the read loop so the client could not
+        // even be answered a ping. JSON-RPC correlates the reply by id, so the
+        // response can land out of order.
+        const { id } = request
+        void handleToolCall(dataDir, turnId, request.params)
+          .then(result => reply(id, result))
+          .catch(e => replyError(id, -32603, e instanceof Error ? e.message : String(e)))
         break
+      }
 
       case 'ping':
         reply(request.id, {})

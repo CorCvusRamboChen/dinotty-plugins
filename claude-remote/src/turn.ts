@@ -34,6 +34,21 @@ export interface TurnRequest extends SpawnOptions {
 }
 
 /**
+ * Which permission mode a turn actually runs in.
+ *
+ * Permission modes are evaluated BEFORE the prompt tool, so a mode that
+ * auto-approves (acceptEdits, auto, bypassPermissions) resolves the call and the
+ * pane is never asked. Per-call approval only means anything in a mode that
+ * falls through, so asking for it forces `default`.
+ */
+export function resolvePermissionMode(
+  requested: string | undefined,
+  perCallApprovalActive: boolean,
+): string | undefined {
+  return perCallApprovalActive ? 'default' : requested
+}
+
+/**
  * Point Claude at this plugin's own MCP permission server.
  *
  * Returns the extra argv, or null when the request did not ask for it. The
@@ -134,7 +149,7 @@ export function createSnapshotWriter(turnId: string, dataDir: string) {
 }
 
 /** Split a byte stream into lines without dropping a partial trailing line. */
-function forwardLines(
+export function forwardLines(
   stream: NodeJS.ReadableStream,
   onLine: (line: string) => void,
 ): Promise<void> {
@@ -180,8 +195,12 @@ function installStopHandlers(
   if (!stdinLease) return () => { /* nothing wired */ }
 
   let stopped = false
+  // Releasing the handler closes the interface, which fires 'close' like a real
+  // stdin loss would. Without this flag every turn that ended on its own was
+  // recorded as interrupted.
+  let released = false
   const stop = (reason: string) => {
-    if (stopped) return
+    if (stopped || released) return
     stopped = true
     onStop(reason, interruptTurn(child))
   }
@@ -198,7 +217,10 @@ function installStopHandlers(
   })
   rl.on('close', () => stop('stdin-closed'))
 
-  return () => rl.close()
+  return () => {
+    released = true
+    rl.close()
+  }
 }
 
 export interface RunTurnOptions {
@@ -258,6 +280,7 @@ export async function runTurn(key: string, options: RunTurnOptions): Promise<num
 
   const child = spawnTurn(located.bin, request.prompt, {
     ...request,
+    permissionMode: resolvePermissionMode(request.permissionMode, Boolean(approvalArgs)),
     extraArgs: approvalArgs ?? undefined,
   })
   emit({

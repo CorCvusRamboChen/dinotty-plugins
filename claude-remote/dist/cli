@@ -141,11 +141,12 @@ async function probeClaude() {
   }
 }
 function runClaude(bin, args, opts) {
+  const options = { ...opts, windowsHide: true };
   if (IS_WINDOWS && isBatchFile(bin)) {
     const comspec = process.env.ComSpec || "cmd.exe";
-    return execFileAsync(comspec, ["/d", "/s", "/c", bin, ...args], opts);
+    return execFileAsync(comspec, ["/d", "/s", "/c", bin, ...args], options);
   }
-  return execFileAsync(bin, args, opts);
+  return execFileAsync(bin, args, options);
 }
 function isBatchFile(bin) {
   const ext = path.extname(bin).toLowerCase();
@@ -159,10 +160,11 @@ function spawnTurn(bin, prompt, opts = {}) {
   if (opts.allowedTools?.length) args.push("--allowedTools", opts.allowedTools.join(","));
   if (opts.model) args.push("--model", opts.model);
   if (opts.extraArgs?.length) args.push(...opts.extraArgs);
-  const child = IS_WINDOWS && isBatchFile(bin) ? (0, import_node_child_process.spawn)(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", bin, ...args], {
+  const spawnOptions = {
     cwd: opts.cwd,
-    stdio: ["pipe", "pipe", "pipe"]
-  }) : (0, import_node_child_process.spawn)(bin, args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    windowsHide: true
+  };
+  const child = IS_WINDOWS && isBatchFile(bin) ? (0, import_node_child_process.spawn)(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", bin, ...args], spawnOptions) : (0, import_node_child_process.spawn)(bin, args, spawnOptions);
   child.stdin?.end(prompt);
   return child;
 }
@@ -277,7 +279,11 @@ function createTurnReducer(turnId, prompt, now = Date.now) {
           messages.push({ role: "system", text: sidecar.data });
           touch();
         } else if (sidecar.event === "stopping") {
-          messages.push({ role: "system", text: "Interrupted." });
+          const outcome = event.outcome;
+          messages.push({
+            role: "system",
+            text: outcome === "killed" ? "Stopped. Claude was killed rather than interrupted, so this turn may be left unfinished in the session." : "Interrupted."
+          });
           touch();
         }
       }
@@ -452,17 +458,15 @@ async function runPermissionServer(turnId) {
           }]
         });
         break;
-      case "tools/call":
+      case "tools/call": {
         if (request.params?.name !== TOOL_NAME) {
           replyError(request.id, -32602, `unknown tool: ${request.params?.name}`);
           break;
         }
-        try {
-          reply(request.id, await handleToolCall(dataDir, turnId, request.params));
-        } catch (e) {
-          replyError(request.id, -32603, e instanceof Error ? e.message : String(e));
-        }
+        const { id } = request;
+        void handleToolCall(dataDir, turnId, request.params).then((result) => reply(id, result)).catch((e) => replyError(id, -32603, e instanceof Error ? e.message : String(e)));
         break;
+      }
       case "ping":
         reply(request.id, {});
         break;
@@ -488,6 +492,9 @@ function cliEntryPoint() {
 }
 
 // src/turn.ts
+function resolvePermissionMode(requested, perCallApprovalActive) {
+  return perCallApprovalActive ? "default" : requested;
+}
 function perCallApprovalArgs(turnId, dataDir) {
   if (!dataDir) return null;
   const configPath = path3.join(dataDir, `${turnId}-mcp.json`);
@@ -590,8 +597,9 @@ function installStopHandlers(child, stdinLease, onStop) {
   if (!stdinLease) return () => {
   };
   let stopped = false;
+  let released = false;
   const stop = (reason) => {
-    if (stopped) return;
+    if (stopped || released) return;
     stopped = true;
     onStop(reason, interruptTurn(child));
   };
@@ -605,7 +613,10 @@ function installStopHandlers(child, stdinLease, onStop) {
     }
   });
   rl.on("close", () => stop("stdin-closed"));
-  return () => rl.close();
+  return () => {
+    released = true;
+    rl.close();
+  };
 }
 async function runTurn(key, options) {
   const dataDir = process.env.DINOTTY_PLUGIN_DATA_DIR ?? "";
@@ -649,6 +660,7 @@ async function runTurn(key, options) {
   }
   const child = spawnTurn(located.bin, request.prompt, {
     ...request,
+    permissionMode: resolvePermissionMode(request.permissionMode, Boolean(approvalArgs)),
     extraArgs: approvalArgs ?? void 0
   });
   emit({

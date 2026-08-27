@@ -143,7 +143,16 @@ export function createTurnReducer(turnId: string, prompt: string, now = Date.now
           messages.push({ role: 'system', text: sidecar.data })
           touch()
         } else if (sidecar.event === 'stopping') {
-          messages.push({ role: 'system', text: 'Interrupted.' })
+          // Windows has no SIGINT, so the stop is a hard kill and the turn may
+          // be left unfinished in the session. Report which one happened rather
+          // than implying a clean interrupt everywhere.
+          const outcome = (event as { outcome?: string }).outcome
+          messages.push({
+            role: 'system',
+            text: outcome === 'killed'
+              ? 'Stopped. Claude was killed rather than interrupted, so this turn may be left unfinished in the session.'
+              : 'Interrupted.',
+          })
           touch()
         }
       }

@@ -9,8 +9,14 @@
 //!   npm run build:windows-launcher
 
 use std::env;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
+
+/// dinotty starts this launcher with CREATE_NO_WINDOW, but that does not reach
+/// the node process the launcher starts. Without it a console window flashes on
+/// every sidecar and permission-server spawn.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() -> ExitCode {
     let exe = match env::current_exe() {
@@ -29,6 +35,7 @@ fn main() -> ExitCode {
     // `node` is looked up on PATH by CreateProcess. dinotty injects the host
     // environment, so a Node installed for the user is visible here.
     let mut command = Command::new("node");
+    command.creation_flags(CREATE_NO_WINDOW);
     command.arg(&script);
     command.args(env::args_os().skip(1));
 

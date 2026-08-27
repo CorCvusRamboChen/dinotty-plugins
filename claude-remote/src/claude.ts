@@ -9,7 +9,12 @@
  * batch-file target has to be routed through the command interpreter.
  */
 
-import { spawn, execFile, type ChildProcess } from 'node:child_process'
+import {
+  spawn,
+  execFile,
+  type ChildProcess,
+  type SpawnOptionsWithoutStdio,
+} from 'node:child_process'
 import { promisify } from 'node:util'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -159,11 +164,15 @@ export async function probeClaude(): Promise<ClaudeProbe> {
 }
 
 function runClaude(bin: string, args: string[], opts: { timeout: number }) {
+  // windowsHide defaults to false, so without it every probe pops a console
+  // window. dinotty sets CREATE_NO_WINDOW on the processes it starts, but that
+  // does not reach the grandchildren we start ourselves.
+  const options = { ...opts, windowsHide: true }
   if (IS_WINDOWS && isBatchFile(bin)) {
     const comspec = process.env.ComSpec || 'cmd.exe'
-    return execFileAsync(comspec, ['/d', '/s', '/c', bin, ...args], opts)
+    return execFileAsync(comspec, ['/d', '/s', '/c', bin, ...args], options)
   }
-  return execFileAsync(bin, args, opts)
+  return execFileAsync(bin, args, options)
 }
 
 function isBatchFile(bin: string): boolean {
@@ -201,12 +210,14 @@ export function spawnTurn(bin: string, prompt: string, opts: SpawnOptions = {}):
   if (opts.model) args.push('--model', opts.model)
   if (opts.extraArgs?.length) args.push(...opts.extraArgs)
 
+  // windowsHide: without it a console window flashes on every single turn.
+  const spawnOptions: SpawnOptionsWithoutStdio & { windowsHide: boolean } = {
+    cwd: opts.cwd,
+    windowsHide: true,
+  }
   const child = IS_WINDOWS && isBatchFile(bin)
-    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', bin, ...args], {
-        cwd: opts.cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-    : spawn(bin, args, { cwd: opts.cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', bin, ...args], spawnOptions)
+    : spawn(bin, args, spawnOptions)
 
   child.stdin?.end(prompt)
   return child

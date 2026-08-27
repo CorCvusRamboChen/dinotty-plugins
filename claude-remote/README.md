@@ -41,6 +41,11 @@ The plugin drives the `claude` that is already installed and signed in on your
 machine. It never reads, stores, or forwards your credentials — authentication
 happens inside the `claude` process, and the plugin only sees the event stream.
 
+Approving this plugin's permissions is not an OS-level sandbox: its native
+binaries still run as your user and can reach other files and networks. The tool
+allowlist and the Allow / Deny prompt govern what *Claude* is permitted to do
+within a turn; they are not a confinement boundary around the sidecar itself.
+
 ## Install (development)
 
 ```bash
@@ -153,6 +158,11 @@ instead of wedging the session. A leftover decision from an earlier prompt in
 the same turn is cleared before a new one is published, or the second prompt
 would be answered instantly by the first one's answer.
 
+Turning per-call approval on **forces `--permission-mode default`**. Permission
+modes are evaluated before the prompt tool, so under `acceptEdits` (or `auto`,
+or `bypassPermissions`) the call is resolved at the mode step and the pane is
+never asked — the toggle would silently do nothing.
+
 An allow always sends `updatedInput`: before Claude Code v2.1.207 an allow
 without it was rejected as a validation error, which reads to the user as a
 mysterious denial. The config deliberately omits `--strict-mcp-config`, which
@@ -189,9 +199,11 @@ which break the obvious implementation:
    `system/status`, which the recorded fixture does not contain. Unknown event
    types are ignored rather than treated as errors.
 
-`capabilities` in `system/init` requires Claude Code v2.1.205+. On older builds
-the field is simply absent, so feature detection falls back to comparing
-`claude_code_version`, and the pane header shows a warning marker.
+`capabilities` in `system/init` requires Claude Code v2.1.205+, and the field is
+simply absent on older builds. Every gate here is currently a version compare
+(`src/versions.ts`): `system/init` only arrives once a turn is already running,
+whereas the gates are needed before one starts, to decide what the pane offers.
+The header shows a marker when the build predates the field.
 
 `crypto.randomUUID()` is not used anywhere: it is undefined on insecure origins,
 and reaching dinotty from a phone means plain `http://<lan-ip>:8999`.
@@ -203,7 +215,10 @@ the sidecar module drags `node:child_process` into the browser bundle.
 ## Roadmap
 
 - [x] **M1** — pane shell, environment probe, three explicit failure states
-      (not installed / too old / cannot run)
+      (not installed / too old / cannot run). Note: the plan asked for a
+      *logged-out* state; `claude --version` succeeds when logged out, so being
+      signed out currently surfaces as an auth error on the first turn instead
+      of up front.
 - [x] **M2** — send a message, read `session_id` from `system/init`, resume with
       `--resume`, session persisted per pane
 - [x] **M3a** — `--include-partial-messages` incremental rendering, interrupt via
@@ -212,10 +227,15 @@ the sidecar module drags `node:child_process` into the browser bundle.
       managed process plus a polled snapshot
 - [x] **M4** — permission-mode selector and a per-pane tool allowlist, built
       from the tool list `system/init` reports
-- [x] **M5** — per-call Allow / Deny, through a bundled MCP permission server
+- [x] **M4b** — per-call Allow / Deny, through a bundled MCP permission server
+- [ ] **M5** — take over a Remote Control session this plugin did not start.
+      This is the plan's M5 and the only part that needs the reverse-engineered
+      protocol; nothing here implements it yet.
 
-Not done yet: editing a tool's input before allowing it (the wire format
-supports it, the pane has no editor), and "allow and remember" rules.
+Not done yet within the milestones above: editing a tool's input before
+allowing it (the wire format supports it, the pane has no editor), "allow and
+remember" rules, and a `--include-partial-messages` fixture (the recorded
+stream covers the error path only).
 
 ## Development
 
