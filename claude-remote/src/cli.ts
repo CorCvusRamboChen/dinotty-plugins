@@ -11,8 +11,9 @@
 
 import { probeClaude } from './claude'
 import { runTurn } from './turn'
+import { runPermissionServer } from './mcp-permission'
 
-const SUBCOMMANDS = ['probe', 'turn', 'help'] as const
+const SUBCOMMANDS = ['probe', 'turn', 'mcp-permission', 'help'] as const
 
 function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n')
@@ -49,6 +50,18 @@ async function main(): Promise<void> {
         stdinLease: rest.includes('--stdin-lease'),
         persist: rest.includes('--persist'),
       })
+      break
+    }
+    case 'mcp-permission': {
+      // Spawned by `claude`, not by dinotty: this speaks MCP over stdio and
+      // relays each permission prompt to the pane.
+      const turnId = rest[0]
+      if (!turnId) {
+        emit({ type: 'error', error: 'usage: mcp-permission <turn-id>' })
+        code = 1
+        break
+      }
+      code = await runPermissionServer(turnId)
       break
     }
     case 'help':

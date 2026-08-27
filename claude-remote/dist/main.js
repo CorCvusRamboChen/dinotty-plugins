@@ -1,3 +1,6 @@
+// src/versions.ts
+var PER_CALL_APPROVAL_SINCE = "2.1.199";
+
 // src/conversation.ts
 var turnCounter = 0;
 function nextTurnId() {
@@ -19,6 +22,10 @@ function createConversation(ctx, paneKey, onError) {
     model: null,
     lastCostUsd: null,
     permissionMode: DEFAULT_PERMISSION_MODE,
+    tools: [],
+    allowedTools: [],
+    perCallApproval: false,
+    pendingApproval: null,
     reattached: false
   });
   const sessionKey = `session-${paneKey.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
@@ -44,6 +51,7 @@ function createConversation(ctx, paneKey, onError) {
     state.live = snapshot.messages;
     if (snapshot.sessionId) state.sessionId = snapshot.sessionId;
     if (snapshot.model) state.model = snapshot.model;
+    if (snapshot.tools?.length) state.tools = snapshot.tools;
     if (snapshot.costUsd !== null) state.lastCostUsd = snapshot.costUsd;
   }
   async function finishTurn(snapshot) {
@@ -56,6 +64,7 @@ function createConversation(ctx, paneKey, onError) {
     state.live = [];
     state.sending = false;
     state.reattached = false;
+    state.pendingApproval = null;
     const finishedTurnId = activeTurnId;
     activeTurnId = null;
     await saveSession({
@@ -84,6 +93,12 @@ function createConversation(ctx, paneKey, onError) {
       } catch {
         snapshot = void 0;
       }
+      try {
+        state.pendingApproval = await ctx.storage.get(`${turnId}-ask`) ?? null;
+      } catch {
+        state.pendingApproval = null;
+      }
+      if (state.pendingApproval) lastSeenAt = Date.now();
       if (snapshot) {
         if (snapshot.updatedAt !== lastUpdatedAt) {
           lastUpdatedAt = snapshot.updatedAt;
@@ -127,6 +142,8 @@ function createConversation(ctx, paneKey, onError) {
     if (saved.sessionId) state.sessionId = saved.sessionId;
     if (saved.model) state.model = saved.model;
     if (saved.history?.length) state.history = saved.history;
+    if (saved.allowedTools) state.allowedTools = saved.allowedTools;
+    if (saved.perCallApproval !== void 0) state.perCallApproval = saved.perCallApproval;
     if (saved.activeTurnId) {
       state.reattached = true;
       follow(saved.activeTurnId);
@@ -145,6 +162,8 @@ function createConversation(ctx, paneKey, onError) {
         cwd: ctx.terminal.activeCwd() ?? void 0,
         resumeSessionId: state.sessionId ?? void 0,
         permissionMode: state.permissionMode,
+        allowedTools: state.allowedTools.length ? state.allowedTools : void 0,
+        perCallApproval: state.perCallApproval,
         partialMessages: true
       });
       await saveSession({ activeTurnId: turnId });
@@ -174,6 +193,28 @@ function createConversation(ctx, paneKey, onError) {
       onError(`interrupt failed: ${describe(e)}`);
     }
   }
+  async function decide(behavior) {
+    const pending = state.pendingApproval;
+    if (!pending || !activeTurnId) return;
+    try {
+      await ctx.storage.set(`${activeTurnId}-decision`, {
+        id: pending.id,
+        behavior,
+        message: behavior === "deny" ? "Denied from the Claude Remote pane" : void 0
+      });
+      state.pendingApproval = null;
+    } catch (e) {
+      onError(`could not record the decision: ${describe(e)}`);
+    }
+  }
+  function setAllowedTools(tools) {
+    state.allowedTools = tools;
+    void saveSession({ allowedTools: tools });
+  }
+  function setPerCallApproval(enabled) {
+    state.perCallApproval = enabled;
+    void saveSession({ perCallApproval: enabled });
+  }
   function reset() {
     if (pollTimer) {
       clearTimeout(pollTimer);
@@ -184,6 +225,7 @@ function createConversation(ctx, paneKey, onError) {
     state.live = [];
     state.sending = false;
     state.reattached = false;
+    state.pendingApproval = null;
     state.sessionId = null;
     state.model = null;
     state.lastCostUsd = null;
@@ -197,7 +239,17 @@ function createConversation(ctx, paneKey, onError) {
       pollTimer = null;
     }
   }
-  return { state, send, interrupt, reset, restore, dispose };
+  return {
+    state,
+    send,
+    interrupt,
+    decide,
+    setAllowedTools,
+    setPerCallApproval,
+    reset,
+    restore,
+    dispose
+  };
 }
 function emptySnapshot(turnId) {
   return {
@@ -206,6 +258,7 @@ function emptySnapshot(turnId) {
     sessionId: null,
     model: null,
     messages: [],
+    tools: [],
     costUsd: null,
     updatedAt: Date.now()
   };
@@ -215,7 +268,7 @@ function describe(e) {
 }
 
 // src/ui.ts
-var PERMISSION_MODES = ["default", "acceptEdits", "auto", "dontAsk"];
+var PERMISSION_MODES = ["default", "acceptEdits", "plan", "auto", "dontAsk"];
 var STRINGS = {
   en: {
     title: "Claude Remote",
@@ -235,7 +288,14 @@ var STRINGS = {
     sessionLabel: (id) => `session ${id.slice(0, 8)}`,
     costLabel: (usd) => `$${usd.toFixed(4)}`,
     permissionLabel: "Permissions",
-    reattached: "Reattached to a turn already in progress."
+    reattached: "Reattached to a turn already in progress.",
+    perCall: "Ask every time",
+    perCallUnsupported: (min) => `Per-call approval needs Claude Code ${min} or newer.`,
+    approvalTitle: (tool) => `Claude wants to use ${tool}`,
+    allow: "Allow",
+    deny: "Deny",
+    toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
+    toolsHint: "Checked tools run without asking."
   },
   zh: {
     title: "Claude Remote",
@@ -255,7 +315,14 @@ var STRINGS = {
     sessionLabel: (id) => `\u4F1A\u8BDD ${id.slice(0, 8)}`,
     costLabel: (usd) => `$${usd.toFixed(4)}`,
     permissionLabel: "\u6743\u9650\u6A21\u5F0F",
-    reattached: "\u5DF2\u91CD\u65B0\u63A5\u4E0A\u4E00\u4E2A\u6B63\u5728\u8FDB\u884C\u7684\u56DE\u5408\u3002"
+    reattached: "\u5DF2\u91CD\u65B0\u63A5\u4E0A\u4E00\u4E2A\u6B63\u5728\u8FDB\u884C\u7684\u56DE\u5408\u3002",
+    perCall: "\u6BCF\u6B21\u8BE2\u95EE",
+    perCallUnsupported: (min) => `\u9010\u6B21\u786E\u8BA4\u9700\u8981 Claude Code ${min} \u6216\u66F4\u9AD8\u7248\u672C\u3002`,
+    approvalTitle: (tool) => `Claude \u60F3\u4F7F\u7528 ${tool}`,
+    allow: "\u5141\u8BB8",
+    deny: "\u62D2\u7EDD",
+    toolsLabel: (allowed, total) => `\u5DE5\u5177 ${allowed}/${total}`,
+    toolsHint: "\u52FE\u9009\u7684\u5DE5\u5177\u4E0D\u518D\u8BE2\u95EE\u3002"
   }
 };
 function activate(ctx) {
@@ -386,6 +453,71 @@ function activate(ctx) {
       }, message.text))
     ].filter(Boolean));
   }
+  function renderPerCallToggle(conversation) {
+    const s = t();
+    const { state } = conversation;
+    const supported = probe.value?.supportsPerCallApproval !== false;
+    return h("label", {
+      class: `cr-percall${supported ? "" : " cr-percall-disabled"}`,
+      title: supported ? s.perCall : s.perCallUnsupported(PER_CALL_APPROVAL_SINCE)
+    }, [
+      h("input", {
+        type: "checkbox",
+        checked: state.perCallApproval && supported,
+        disabled: state.sending || !supported,
+        onChange: (e) => conversation.setPerCallApproval(e.target.checked)
+      }),
+      h("span", null, s.perCall)
+    ]);
+  }
+  function renderApproval(conversation) {
+    const s = t();
+    const pending = conversation.state.pendingApproval;
+    if (!pending) return null;
+    const detail = summariseInput(pending.input);
+    return h("div", { class: "cr-approval" }, [
+      h("div", { class: "cr-approval-title" }, s.approvalTitle(pending.toolName)),
+      detail ? h("pre", { class: "cr-approval-detail" }, detail) : null,
+      h("div", { class: "cr-approval-actions" }, [
+        h("button", {
+          class: "cr-btn cr-btn-deny",
+          onClick: () => void conversation.decide("deny")
+        }, s.deny),
+        h("button", {
+          class: "cr-btn cr-btn-allow",
+          onClick: () => void conversation.decide("allow")
+        }, s.allow)
+      ])
+    ].filter(Boolean));
+  }
+  function renderTools(conversation) {
+    const s = t();
+    const { state } = conversation;
+    if (!state.tools.length) return null;
+    const allowed = new Set(state.allowedTools);
+    return h("details", { class: "cr-tools" }, [
+      h(
+        "summary",
+        { class: "cr-tools-summary" },
+        s.toolsLabel(allowed.size, state.tools.length)
+      ),
+      h("div", { class: "cr-tools-hint" }, s.toolsHint),
+      h("div", { class: "cr-tools-list" }, state.tools.map((tool) => h("label", { class: "cr-tool", key: tool }, [
+        h("input", {
+          type: "checkbox",
+          checked: allowed.has(tool),
+          disabled: state.sending,
+          onChange: (e) => {
+            const next = new Set(state.allowedTools);
+            if (e.target.checked) next.add(tool);
+            else next.delete(tool);
+            conversation.setAllowedTools([...next]);
+          }
+        }),
+        h("span", null, tool)
+      ])))
+    ]);
+  }
   function renderComposer(conversation) {
     const s = t();
     const { state } = conversation;
@@ -399,6 +531,7 @@ function activate(ctx) {
           state.permissionMode = e.target.value;
         }
       }, PERMISSION_MODES.map((mode) => h("option", { value: mode, key: mode }, mode))),
+      renderPerCallToggle(conversation),
       h("textarea", {
         class: "cr-input",
         rows: 3,
@@ -435,9 +568,11 @@ function activate(ctx) {
           return h("div", { class: "cr-root" }, [
             renderHeader(conversation),
             blocker ?? h("div", { class: "cr-body" }, [
+              renderTools(conversation),
               renderTranscript(conversation),
+              renderApproval(conversation),
               renderComposer(conversation)
-            ])
+            ].filter(Boolean))
           ]);
         };
       }
@@ -447,6 +582,17 @@ function activate(ctx) {
       conversations.clear();
     }
   };
+}
+function summariseInput(input) {
+  if (input === null || input === void 0) return "";
+  if (typeof input === "string") return input;
+  try {
+    const text = JSON.stringify(input, null, 2);
+    return text.length > 800 ? `${text.slice(0, 800)}
+\u2026` : text;
+  } catch {
+    return String(input);
+  }
 }
 export {
   activate

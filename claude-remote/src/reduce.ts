@@ -36,6 +36,8 @@ export interface TurnSnapshot {
   sessionId: string | null
   model: string | null
   messages: Message[]
+  /** Tools this session exposes, from system/init; drives the allowlist UI. */
+  tools: string[]
   costUsd: number | null
   exitCode?: number | null
   /** Epoch millis of the last change, so a stalled turn is visible as stalled. */
@@ -54,6 +56,7 @@ export function createTurnReducer(turnId: string, prompt: string, now = Date.now
   const messages: Message[] = [{ role: 'user', text: prompt }]
   let sessionId: string | null = null
   let model: string | null = null
+  let tools: string[] = []
   let costUsd: number | null = null
   let status: TurnStatus = 'running'
   let exitCode: number | null | undefined
@@ -85,6 +88,7 @@ export function createTurnReducer(turnId: string, prompt: string, now = Date.now
       if (isInit(event)) {
         sessionId = event.session_id
         if (event.model) model = event.model
+        if (Array.isArray(event.tools)) tools = event.tools
         touch()
         return
       }
@@ -165,6 +169,7 @@ export function createTurnReducer(turnId: string, prompt: string, now = Date.now
         status,
         sessionId,
         model,
+        tools: [...tools],
         costUsd,
         exitCode,
         updatedAt,

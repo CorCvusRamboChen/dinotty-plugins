@@ -3,9 +3,10 @@
 An interactive Claude Code pane for dinotty — streaming output, interrupt, and
 visible permission controls.
 
-> Status: sending, streaming, resume, interrupt, and reconnecting to a turn in
-> progress all work. Per-call permission prompts do not. See
-> [Roadmap](#roadmap).
+> Status: feature-complete for the roadmap below — sending, streaming, resume,
+> interrupt, reconnect, a tool allowlist, and per-call Allow / Deny. Per-call
+> approval needs Claude Code 2.1.199 or newer; the pane disables the control and
+> says so on older builds.
 
 ## How this differs from Session Browser
 
@@ -26,7 +27,7 @@ This plugin exists to do those four things properly:
 |---|---|---|
 | Output | one blocking call, buffered JSON | `--output-format stream-json`, incremental |
 | Interrupt | none | SIGINT on POSIX; hard kill on Windows |
-| Permissions | hardcoded `acceptEdits` | surfaced and user-controlled |
+| Permissions | hardcoded `acceptEdits` | mode selector, per-pane tool allowlist, and per-call Allow / Deny |
 | Platforms | `which`, POSIX only | `where.exe` + `.cmd` handling, native Windows launcher |
 | Disconnect | turn dies with the request | turn keeps running; any device can reattach |
 
@@ -128,6 +129,39 @@ encoding edge cases. The pane stages the whole request with `ctx.storage.set()`
 — which the host writes to `$DINOTTY_PLUGIN_DATA_DIR/<key>.json` — and passes
 only the key. The sidecar deletes that file as soon as it reads it.
 
+### Per-call Allow / Deny
+
+`claude -p` has no permission callback, so the pane cannot simply be asked. What
+it does have is `--permission-prompt-tool`, which names an MCP tool to consult
+whenever a call reaches the prompt step. This plugin ships that server: the same
+sidecar binary, re-entered as `mcp-permission`, spawned by `claude` rather than
+by dinotty and inheriting the plugin's data directory through it.
+
+The exchange is two files beside the turn's other state:
+
+```
+<turnId>-ask.json       written by the permission server, polled by the pane
+<turnId>-decision.json  written by the pane, consumed by the permission server
+```
+
+A separate file rather than the snapshot, because the snapshot is rewritten
+wholesale by the turn runner and two writers would race.
+
+Claude blocks on the MCP call until it returns, which is the point — but it
+cannot block forever, so an unanswered prompt denies itself after ten minutes
+instead of wedging the session. A leftover decision from an earlier prompt in
+the same turn is cleared before a new one is published, or the second prompt
+would be answered instantly by the first one's answer.
+
+An allow always sends `updatedInput`: before Claude Code v2.1.207 an allow
+without it was rejected as a validation error, which reads to the user as a
+mysterious denial. The config deliberately omits `--strict-mcp-config`, which
+would drop the user's own MCP servers for the turn.
+
+No Agent SDK dependency is involved. The SDK's `canUseTool` is the other way to
+do this, and it would mean bundling a second copy of the harness; this keeps the
+plugin driving the `claude` the user already has.
+
 ### Interrupting
 
 `ctx.process.stop(pid)` triggers the `stdinLease` protocol: the sidecar receives
@@ -162,6 +196,10 @@ the field is simply absent, so feature detection falls back to comparing
 `crypto.randomUUID()` is not used anywhere: it is undefined on insecure origins,
 and reaching dinotty from a phone means plain `http://<lan-ip>:8999`.
 
+Version gates live in `src/versions.ts`, which imports nothing from Node — the
+pane needs them to explain why a control is disabled, and importing them from
+the sidecar module drags `node:child_process` into the browser bundle.
+
 ## Roadmap
 
 - [x] **M1** — pane shell, environment probe, three explicit failure states
@@ -172,11 +210,12 @@ and reaching dinotty from a phone means plain `http://<lan-ip>:8999`.
       the stdin lease
 - [x] **M3b** — turns survive a disconnect and any device can reattach, via a
       managed process plus a polled snapshot
-- [x] **M4a** — permission-mode selector
-- [ ] **M4b** — allowed-tools UI
-- [ ] **M5** — per-call Allow / Deny. `claude -p` has no callback for this, so it
-      needs the Agent SDK's `canUseTool`, or `--permission-prompt-tool` if it can
-      route prompts to stdout.
+- [x] **M4** — permission-mode selector and a per-pane tool allowlist, built
+      from the tool list `system/init` reports
+- [x] **M5** — per-call Allow / Deny, through a bundled MCP permission server
+
+Not done yet: editing a tool's input before allowing it (the wire format
+supports it, the pane has no editor), and "allow and remember" rules.
 
 ## Development
 

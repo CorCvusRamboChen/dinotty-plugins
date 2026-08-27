@@ -232,3 +232,112 @@
     flex: 1 1 auto;
   }
 }
+
+/* --- Tool allowlist -------------------------------------------------- */
+
+.plugin-host-claude-remote .cr-tools {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--divider);
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.plugin-host-claude-remote .cr-tools-summary {
+  cursor: pointer;
+  color: var(--fg-muted);
+  user-select: none;
+}
+
+.plugin-host-claude-remote .cr-tools-hint {
+  color: var(--fg-muted);
+  margin: 6px 0;
+}
+
+.plugin-host-claude-remote .cr-tools-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  max-height: 22vh;
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+
+.plugin-host-claude-remote .cr-tool {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  cursor: pointer;
+}
+
+/* --- Per-call approval ----------------------------------------------- */
+
+.plugin-host-claude-remote .cr-percall {
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+  cursor: pointer;
+  padding-bottom: 7px;
+}
+
+.plugin-host-claude-remote .cr-percall-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Claude is blocked while this is on screen, so it gets the accent border and
+   sits directly above the composer where a thumb already is. */
+.plugin-host-claude-remote .cr-approval {
+  flex: 0 0 auto;
+  margin: 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+
+.plugin-host-claude-remote .cr-approval-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.plugin-host-claude-remote .cr-approval-detail {
+  margin: 0 0 10px;
+  padding: 8px;
+  max-height: 26vh;
+  overflow: auto;
+  background: var(--bg-input);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plugin-host-claude-remote .cr-approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Deny is first in the DOM so it is the left/away button, but Allow carries the
+   accent. Both are full-height targets for a thumb. */
+.plugin-host-claude-remote .cr-approval-actions .cr-btn {
+  flex: 1 1 auto;
+  padding: 10px 14px;
+}
+
+.plugin-host-claude-remote .cr-btn-allow {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+
+.plugin-host-claude-remote .cr-btn-deny {
+  color: var(--danger);
+  border-color: var(--danger);
+}

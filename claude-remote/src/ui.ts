@@ -1,9 +1,10 @@
 import type { PluginContext, PluginExports } from '../../plugin-api/index'
 import type { ClaudeProbe } from './claude'
+import { PER_CALL_APPROVAL_SINCE } from './versions'
 import { createConversation, type Conversation } from './conversation'
 
 /**
- * Milestone 2: send, stream, resume, interrupt.
+ * The pane: transcript, composer, tool allowlist, and the Allow / Deny card.
  *
  * Two structural facts drive the shape of this file, both easy to get wrong:
  *
@@ -36,9 +37,18 @@ interface Strings {
   costLabel: (usd: number) => string
   permissionLabel: string
   reattached: string
+  perCall: string
+  perCallUnsupported: (min: string) => string
+  approvalTitle: (tool: string) => string
+  allow: string
+  deny: string
+  toolsLabel: (allowed: number, total: number) => string
+  toolsHint: string
 }
 
-const PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'dontAsk'] as const
+// The set `claude --permission-mode` accepts. bypassPermissions is deliberately
+// absent: nothing in this pane should make it a one-tap choice.
+const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'auto', 'dontAsk'] as const
 
 const STRINGS: Record<Locale, Strings> = {
   en: {
@@ -60,6 +70,13 @@ const STRINGS: Record<Locale, Strings> = {
     costLabel: usd => `$${usd.toFixed(4)}`,
     permissionLabel: 'Permissions',
     reattached: 'Reattached to a turn already in progress.',
+    perCall: 'Ask every time',
+    perCallUnsupported: min => `Per-call approval needs Claude Code ${min} or newer.`,
+    approvalTitle: tool => `Claude wants to use ${tool}`,
+    allow: 'Allow',
+    deny: 'Deny',
+    toolsLabel: (allowed, total) => `Tools ${allowed}/${total}`,
+    toolsHint: 'Checked tools run without asking.',
   },
   zh: {
     title: 'Claude Remote',
@@ -80,6 +97,13 @@ const STRINGS: Record<Locale, Strings> = {
     costLabel: usd => `$${usd.toFixed(4)}`,
     permissionLabel: '权限模式',
     reattached: '已重新接上一个正在进行的回合。',
+    perCall: '每次询问',
+    perCallUnsupported: min => `逐次确认需要 Claude Code ${min} 或更高版本。`,
+    approvalTitle: tool => `Claude 想使用 ${tool}`,
+    allow: '允许',
+    deny: '拒绝',
+    toolsLabel: (allowed, total) => `工具 ${allowed}/${total}`,
+    toolsHint: '勾选的工具不再询问。',
   },
 }
 
@@ -227,6 +251,77 @@ export function activate(ctx: PluginContext): PluginExports {
     ].filter(Boolean))
   }
 
+  /**
+   * Claude is blocked on this. The MCP permission server is holding the tool
+   * call open until a decision file appears, so these two buttons are the only
+   * thing standing between the turn and its timeout.
+   */
+  function renderPerCallToggle(conversation: Conversation) {
+    const s = t()
+    const { state } = conversation
+    const supported = probe.value?.supportsPerCallApproval !== false
+    return h('label', {
+      class: `cr-percall${supported ? '' : ' cr-percall-disabled'}`,
+      title: supported ? s.perCall : s.perCallUnsupported(PER_CALL_APPROVAL_SINCE),
+    }, [
+      h('input', {
+        type: 'checkbox',
+        checked: state.perCallApproval && supported,
+        disabled: state.sending || !supported,
+        onChange: (e: any) => conversation.setPerCallApproval(e.target.checked),
+      }),
+      h('span', null, s.perCall),
+    ])
+  }
+
+  function renderApproval(conversation: Conversation) {
+    const s = t()
+    const pending = conversation.state.pendingApproval
+    if (!pending) return null
+    const detail = summariseInput(pending.input)
+    return h('div', { class: 'cr-approval' }, [
+      h('div', { class: 'cr-approval-title' }, s.approvalTitle(pending.toolName)),
+      detail ? h('pre', { class: 'cr-approval-detail' }, detail) : null,
+      h('div', { class: 'cr-approval-actions' }, [
+        h('button', {
+          class: 'cr-btn cr-btn-deny',
+          onClick: () => void conversation.decide('deny'),
+        }, s.deny),
+        h('button', {
+          class: 'cr-btn cr-btn-allow',
+          onClick: () => void conversation.decide('allow'),
+        }, s.allow),
+      ]),
+    ].filter(Boolean))
+  }
+
+  function renderTools(conversation: Conversation) {
+    const s = t()
+    const { state } = conversation
+    if (!state.tools.length) return null
+    const allowed = new Set(state.allowedTools)
+    return h('details', { class: 'cr-tools' }, [
+      h('summary', { class: 'cr-tools-summary' },
+        s.toolsLabel(allowed.size, state.tools.length)),
+      h('div', { class: 'cr-tools-hint' }, s.toolsHint),
+      h('div', { class: 'cr-tools-list' }, state.tools.map(tool =>
+        h('label', { class: 'cr-tool', key: tool }, [
+          h('input', {
+            type: 'checkbox',
+            checked: allowed.has(tool),
+            disabled: state.sending,
+            onChange: (e: any) => {
+              const next = new Set(state.allowedTools)
+              if (e.target.checked) next.add(tool)
+              else next.delete(tool)
+              conversation.setAllowedTools([...next])
+            },
+          }),
+          h('span', null, tool),
+        ]))),
+    ])
+  }
+
   function renderComposer(conversation: Conversation) {
     const s = t()
     const { state } = conversation
@@ -239,6 +334,7 @@ export function activate(ctx: PluginContext): PluginExports {
         onChange: (e: any) => { state.permissionMode = e.target.value },
       }, PERMISSION_MODES.map(mode =>
         h('option', { value: mode, key: mode }, mode))),
+      renderPerCallToggle(conversation),
       h('textarea', {
         class: 'cr-input',
         rows: 3,
@@ -279,9 +375,11 @@ export function activate(ctx: PluginContext): PluginExports {
           return h('div', { class: 'cr-root' }, [
             renderHeader(conversation),
             blocker ?? h('div', { class: 'cr-body' }, [
+              renderTools(conversation),
               renderTranscript(conversation),
+              renderApproval(conversation),
               renderComposer(conversation),
-            ]),
+            ].filter(Boolean)),
           ])
         }
       },
@@ -292,5 +390,20 @@ export function activate(ctx: PluginContext): PluginExports {
       for (const conversation of conversations.values()) conversation.dispose()
       conversations.clear()
     },
+  }
+}
+
+/** A compact, readable rendering of a tool's arguments for the approval card. */
+function summariseInput(input: unknown): string {
+  if (input === null || input === undefined) return ''
+  if (typeof input === 'string') return input
+  try {
+    const text = JSON.stringify(input, null, 2)
+    // Long file contents make the card unusable on a phone; the decision rests
+    // on the tool and its shape, not on every byte.
+    return text.length > 800 ? `${text.slice(0, 800)}
+…` : text
+  } catch {
+    return String(input)
   }
 }

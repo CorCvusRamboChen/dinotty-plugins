@@ -24,10 +24,32 @@ import type { ChildProcess } from 'node:child_process'
 
 import { locateClaude, spawnTurn, interruptTurn, type SpawnOptions } from './claude'
 import { createTurnReducer, type TurnReducer } from './reduce'
+import { mcpConfigDocument, PERMISSION_TOOL_ID } from './mcp-permission'
 import type { StreamEvent } from './protocol'
 
 export interface TurnRequest extends SpawnOptions {
   prompt: string
+  /** Route each unapproved tool call to the pane instead of a permission mode. */
+  perCallApproval?: boolean
+}
+
+/**
+ * Point Claude at this plugin's own MCP permission server.
+ *
+ * Returns the extra argv, or null when the request did not ask for it. The
+ * config file lives beside the turn's other state and is cleaned up with it.
+ */
+function perCallApprovalArgs(turnId: string, dataDir: string): string[] | null {
+  if (!dataDir) return null
+  const configPath = path.join(dataDir, `${turnId}-mcp.json`)
+  try {
+    fs.writeFileSync(configPath, mcpConfigDocument(turnId, dataDir), 'utf-8')
+  } catch {
+    return null
+  }
+  // Deliberately not --strict-mcp-config: that would drop the user's own MCP
+  // servers for the turn, which is not ours to decide.
+  return ['--mcp-config', configPath, '--permission-prompt-tool', PERMISSION_TOOL_ID]
 }
 
 /** Snapshots are rewritten in place, so flushing on every token would thrash. */
@@ -221,7 +243,23 @@ export async function runTurn(key: string, options: RunTurnOptions): Promise<num
     return 1
   }
 
-  const child = spawnTurn(located.bin, request.prompt, request)
+  const approvalArgs = request.perCallApproval
+    ? perCallApprovalArgs(key, dataDir)
+    : null
+  if (request.perCallApproval && !approvalArgs) {
+    const warning = {
+      type: 'sidecar',
+      event: 'stderr',
+      data: 'Could not set up per-call approval; falling back to the permission mode.',
+    }
+    emit(warning)
+    record(warning as StreamEvent)
+  }
+
+  const child = spawnTurn(located.bin, request.prompt, {
+    ...request,
+    extraArgs: approvalArgs ?? undefined,
+  })
   emit({
     type: 'sidecar',
     event: 'started',
@@ -276,6 +314,10 @@ export async function runTurn(key: string, options: RunTurnOptions): Promise<num
 
   reducer.finish(exit.code)
   writer?.flush(reducer)
+  // The prompt file is already gone; clear the rest of the turn's scratch state.
+  for (const suffix of ['-mcp.json', '-ask.json', '-decision.json']) {
+    try { fs.unlinkSync(path.join(dataDir, `${key}${suffix}`)) } catch { /* not there */ }
+  }
   emit({ type: 'sidecar', event: 'exit', code: exit.code, signal: exit.signal })
   return exit.code ?? 0
 }

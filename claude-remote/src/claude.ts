@@ -15,6 +15,15 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
 
+import {
+  compareVersions,
+  CAPABILITIES_SINCE,
+  MIN_CLAUDE_VERSION,
+  PER_CALL_APPROVAL_SINCE,
+} from './versions'
+
+export { compareVersions, CAPABILITIES_SINCE, MIN_CLAUDE_VERSION, PER_CALL_APPROVAL_SINCE }
+
 const execFileAsync = promisify(execFile)
 
 const HOME = os.homedir()
@@ -37,13 +46,11 @@ export interface ClaudeProbe {
   minVersion: string
   /** Whether this build reports `capabilities` in system/init (v2.1.205+). */
   reportsCapabilities?: boolean
+  /** Whether this build can route permission prompts to an MCP tool. */
+  supportsPerCallApproval?: boolean
   error?: string
 }
 
-/** `--output-format stream-json` and `--resume` both predate this comfortably. */
-export const MIN_CLAUDE_VERSION = '2.0.0'
-/** First version that puts a `capabilities` array in `system/init`. */
-export const CAPABILITIES_SINCE = '2.1.205'
 
 /** Explicit override wins over everything; set from the plugin's settings UI. */
 const OVERRIDE_ENV = 'CLAUDE_REMOTE_CLAUDE_BIN'
@@ -137,6 +144,7 @@ export async function probeClaude(): Promise<ClaudeProbe> {
       version,
       versionOk: compareVersions(version, MIN_CLAUDE_VERSION) >= 0,
       reportsCapabilities: compareVersions(version, CAPABILITIES_SINCE) >= 0,
+      supportsPerCallApproval: compareVersions(version, PER_CALL_APPROVAL_SINCE) >= 0,
       minVersion: MIN_CLAUDE_VERSION,
     }
   } catch (e) {
@@ -172,6 +180,8 @@ export interface SpawnOptions {
   model?: string
   /** Emit `stream_event` text deltas for incremental rendering. */
   partialMessages?: boolean
+  /** Extra argv appended verbatim; used for the permission-prompt wiring. */
+  extraArgs?: string[]
 }
 
 /**
@@ -189,6 +199,7 @@ export function spawnTurn(bin: string, prompt: string, opts: SpawnOptions = {}):
   if (opts.permissionMode) args.push('--permission-mode', opts.permissionMode)
   if (opts.allowedTools?.length) args.push('--allowedTools', opts.allowedTools.join(','))
   if (opts.model) args.push('--model', opts.model)
+  if (opts.extraArgs?.length) args.push(...opts.extraArgs)
 
   const child = IS_WINDOWS && isBatchFile(bin)
     ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', bin, ...args], {
@@ -216,13 +227,3 @@ export function interruptTurn(child: ChildProcess): 'interrupted' | 'killed' {
   return 'interrupted'
 }
 
-/** Numeric-segment comparison. Returns <0, 0, or >0. */
-export function compareVersions(a: string, b: string): number {
-  const pa = a.split('.').map(n => parseInt(n, 10) || 0)
-  const pb = b.split('.').map(n => parseInt(n, 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const diff = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (diff !== 0) return diff
-  }
-  return 0
-}
