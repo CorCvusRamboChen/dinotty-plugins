@@ -7,9 +7,14 @@
  * with `ctx.storage.set()`, which the host writes to
  * `$DINOTTY_PLUGIN_DATA_DIR/<key>.json`, and passes only the key.
  *
- * stdout is a verbatim passthrough of Claude Code's NDJSON, so `protocol.ts`
- * and the recorded fixtures describe exactly what the pane receives. Anything
- * this process has to say about itself is prefixed with `type: "sidecar"`.
+ * Output does not go back over a socket either. A managed process's stdout is
+ * drained into a bounded host-side buffer that no plugin API can read, so the
+ * turn writes its own reduced state to `<turnId>-log.json` in that same
+ * directory, where the pane picks it up with `ctx.storage.get()`. That file is
+ * what lets a turn survive the browser going away.
+ *
+ * stdout stays a verbatim passthrough of Claude Code's NDJSON so the sidecar is
+ * still debuggable by hand.
  */
 
 import * as fs from 'node:fs'
@@ -18,10 +23,15 @@ import * as readline from 'node:readline'
 import type { ChildProcess } from 'node:child_process'
 
 import { locateClaude, spawnTurn, interruptTurn, type SpawnOptions } from './claude'
+import { createTurnReducer, type TurnReducer } from './reduce'
+import type { StreamEvent } from './protocol'
 
 export interface TurnRequest extends SpawnOptions {
   prompt: string
 }
+
+/** Snapshots are rewritten in place, so flushing on every token would thrash. */
+const FLUSH_INTERVAL_MS = 150
 
 function emit(value: unknown): void {
   process.stdout.write(JSON.stringify(value) + '\n')
@@ -59,6 +69,48 @@ export function readRequest(key: string): TurnRequest | { error: string } {
   }
 }
 
+/**
+ * Persists the reduced turn where `ctx.storage.get()` can read it.
+ *
+ * The write is staged through a temp file and renamed, because a reader that
+ * catches a half-written file gets a 500 "corrupt data" from the host rather
+ * than a retryable empty result. The temp name ends in `.tmp`, which the host's
+ * key listing ignores.
+ */
+export function createSnapshotWriter(turnId: string, dataDir: string) {
+  const target = path.join(dataDir, `${turnId}-log.json`)
+  const staging = `${target}.tmp`
+  let lastRevision = -1
+  let timer: NodeJS.Timeout | null = null
+
+  function writeNow(reducer: TurnReducer): void {
+    if (reducer.revision === lastRevision) return
+    lastRevision = reducer.revision
+    try {
+      fs.writeFileSync(staging, JSON.stringify(reducer.snapshot()), 'utf-8')
+      fs.renameSync(staging, target)
+    } catch (e) {
+      emit({ type: 'sidecar', event: 'error', error: `snapshot write failed: ${describe(e)}` })
+    }
+  }
+
+  return {
+    /** Coalescing flush: at most one write per interval while tokens stream. */
+    schedule(reducer: TurnReducer): void {
+      if (timer) return
+      timer = setTimeout(() => {
+        timer = null
+        writeNow(reducer)
+      }, FLUSH_INTERVAL_MS)
+      timer.unref?.()
+    },
+    flush(reducer: TurnReducer): void {
+      if (timer) { clearTimeout(timer); timer = null }
+      writeNow(reducer)
+    },
+  }
+}
+
 /** Split a byte stream into lines without dropping a partial trailing line. */
 function forwardLines(
   stream: NodeJS.ReadableStream,
@@ -90,13 +142,17 @@ function forwardLines(
  *
  * With `bin.lifecycle.stdinLease`, a graceful stop arrives as a single
  * `{"type":"shutdown","deadlineMs":N}` line on stdin. Losing stdin entirely
- * (the host died, or the WebSocket dropped) has to count as a stop too,
- * otherwise the claude child outlives its supervisor.
+ * (the host died) has to count as a stop too, otherwise the claude child
+ * outlives its supervisor.
  *
  * Either way we interrupt rather than kill: SIGINT ends the turn cleanly, while
  * a hard kill leaves it unfinished in the session transcript.
  */
-function installStopHandlers(child: ChildProcess, stdinLease: boolean): () => void {
+function installStopHandlers(
+  child: ChildProcess,
+  stdinLease: boolean,
+  onStop: (reason: string, outcome: string) => void,
+): () => void {
   // Without a lease the host gives us no stdin, and a closed stdin would
   // otherwise read as an immediate stop and kill the turn the moment it starts.
   if (!stdinLease) return () => { /* nothing wired */ }
@@ -105,8 +161,7 @@ function installStopHandlers(child: ChildProcess, stdinLease: boolean): () => vo
   const stop = (reason: string) => {
     if (stopped) return
     stopped = true
-    const outcome = interruptTurn(child)
-    emit({ type: 'sidecar', event: 'stopping', reason, outcome })
+    onStop(reason, interruptTurn(child))
   }
 
   const rl = readline.createInterface({ input: process.stdin })
@@ -124,16 +179,45 @@ function installStopHandlers(child: ChildProcess, stdinLease: boolean): () => vo
   return () => rl.close()
 }
 
-export async function runTurn(key: string, stdinLease: boolean): Promise<number> {
+export interface RunTurnOptions {
+  stdinLease: boolean
+  /** Write `<turnId>-log.json` so the pane can reconnect to a running turn. */
+  persist: boolean
+}
+
+export async function runTurn(key: string, options: RunTurnOptions): Promise<number> {
+  const dataDir = process.env.DINOTTY_PLUGIN_DATA_DIR ?? ''
+  const persist = options.persist && Boolean(dataDir)
   const request = readRequest(key)
+
   if ('error' in request) {
-    emit({ type: 'sidecar', event: 'error', error: request.error })
+    const failure = { type: 'sidecar', event: 'error', error: request.error }
+    emit(failure)
+    if (persist) {
+      // Still leave a snapshot: a pane that only polls would otherwise wait
+      // forever on a turn that never started.
+      const reducer = createTurnReducer(key, '(prompt unavailable)')
+      reducer.apply(failure as StreamEvent)
+      reducer.finish(1)
+      createSnapshotWriter(key, dataDir).flush(reducer)
+    }
     return 1
+  }
+
+  const reducer = createTurnReducer(key, request.prompt)
+  const writer = persist ? createSnapshotWriter(key, dataDir) : null
+  const record = (event: StreamEvent) => {
+    reducer.apply(event)
+    writer?.schedule(reducer)
   }
 
   const located = await locateClaude()
   if (!located) {
-    emit({ type: 'sidecar', event: 'error', error: 'claude executable not found' })
+    const failure = { type: 'sidecar', event: 'error', error: 'claude executable not found' }
+    emit(failure)
+    reducer.apply(failure as StreamEvent)
+    reducer.finish(1)
+    writer?.flush(reducer)
     return 1
   }
 
@@ -145,29 +229,57 @@ export async function runTurn(key: string, stdinLease: boolean): Promise<number>
     pid: child.pid ?? null,
     resumed: Boolean(request.resumeSessionId),
   })
+  // Publish immediately so a pane that reconnects between spawn and first token
+  // sees a running turn rather than a missing one.
+  writer?.flush(reducer)
 
-  const releaseStopHandlers = installStopHandlers(child, stdinLease)
+  const releaseStopHandlers = installStopHandlers(child, options.stdinLease, (reason, outcome) => {
+    const event = { type: 'sidecar', event: 'stopping', reason, outcome }
+    emit(event)
+    record(event as StreamEvent)
+  })
 
   const stdoutDone = child.stdout
-    ? forwardLines(child.stdout, line => process.stdout.write(line + '\n'))
+    ? forwardLines(child.stdout, line => {
+        process.stdout.write(line + '\n')
+        try {
+          record(JSON.parse(line) as StreamEvent)
+        } catch {
+          // Claude occasionally writes a non-JSON warning line; the raw form is
+          // already on stdout, and it is not worth failing the turn over.
+        }
+      })
     : Promise.resolve()
+
   const stderrDone = child.stderr
-    ? forwardLines(child.stderr, line => emit({ type: 'sidecar', event: 'stderr', data: line }))
+    ? forwardLines(child.stderr, line => {
+        const event = { type: 'sidecar', event: 'stderr', data: line }
+        emit(event)
+        record(event as StreamEvent)
+      })
     : Promise.resolve()
 
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
     child.on('error', e => {
-      emit({ type: 'sidecar', event: 'error', error: e.message })
+      const event = { type: 'sidecar', event: 'error', error: e.message }
+      emit(event)
+      record(event as StreamEvent)
       resolve({ code: 1, signal: null })
     })
     child.on('close', (code, signal) => resolve({ code, signal }))
   })
 
-  // Drain whatever is still buffered before announcing the exit, so the pane
-  // never sees `exit` ahead of the events that preceded it.
+  // Drain whatever is still buffered before announcing the exit, so neither the
+  // stream nor the snapshot shows `exit` ahead of the events that preceded it.
   await Promise.all([stdoutDone, stderrDone])
   releaseStopHandlers()
 
+  reducer.finish(exit.code)
+  writer?.flush(reducer)
   emit({ type: 'sidecar', event: 'exit', code: exit.code, signal: exit.signal })
   return exit.code ?? 0
+}
+
+function describe(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }

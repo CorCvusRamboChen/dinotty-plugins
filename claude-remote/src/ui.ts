@@ -35,6 +35,7 @@ interface Strings {
   sessionLabel: (id: string) => string
   costLabel: (usd: number) => string
   permissionLabel: string
+  reattached: string
 }
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'auto', 'dontAsk'] as const
@@ -58,6 +59,7 @@ const STRINGS: Record<Locale, Strings> = {
     sessionLabel: id => `session ${id.slice(0, 8)}`,
     costLabel: usd => `$${usd.toFixed(4)}`,
     permissionLabel: 'Permissions',
+    reattached: 'Reattached to a turn already in progress.',
   },
   zh: {
     title: 'Claude Remote',
@@ -77,6 +79,7 @@ const STRINGS: Record<Locale, Strings> = {
     sessionLabel: id => `会话 ${id.slice(0, 8)}`,
     costLabel: usd => `$${usd.toFixed(4)}`,
     permissionLabel: '权限模式',
+    reattached: '已重新接上一个正在进行的回合。',
   },
 }
 
@@ -207,6 +210,23 @@ export function activate(ctx: PluginContext): PluginExports {
     ].filter(Boolean))
   }
 
+  function renderTranscript(conversation: Conversation) {
+    const s = t()
+    const { state } = conversation
+    const messages = [...state.history, ...state.live]
+    if (!messages.length) return h('div', { class: 'cr-transcript' }, h('div', { class: 'cr-empty' }, s.empty))
+    return h('div', { class: 'cr-transcript' }, [
+      state.reattached
+        ? h('div', { class: 'cr-msg cr-msg-system' }, s.reattached)
+        : null,
+      ...messages.map((message, i) =>
+        h('div', {
+          class: `cr-msg cr-msg-${message.role}${message.streaming ? ' cr-msg-streaming' : ''}`,
+          key: i,
+        }, message.text)),
+    ].filter(Boolean))
+  }
+
   function renderComposer(conversation: Conversation) {
     const s = t()
     const { state } = conversation
@@ -255,20 +275,11 @@ export function activate(ctx: PluginContext): PluginExports {
       setup(props: any) {
         const conversation = conversationFor(props)
         return () => {
-          const s = t()
           const blocker = ready.value ? null : renderBlocker()
-          const { state } = conversation
           return h('div', { class: 'cr-root' }, [
             renderHeader(conversation),
             blocker ?? h('div', { class: 'cr-body' }, [
-              h('div', { class: 'cr-transcript' },
-                state.messages.length
-                  ? state.messages.map((message, i) =>
-                      h('div', {
-                        class: `cr-msg cr-msg-${message.role}${message.streaming ? ' cr-msg-streaming' : ''}`,
-                        key: i,
-                      }, message.text))
-                  : h('div', { class: 'cr-empty' }, s.empty)),
+              renderTranscript(conversation),
               renderComposer(conversation),
             ]),
           ])
@@ -276,9 +287,9 @@ export function activate(ctx: PluginContext): PluginExports {
       },
     },
     dispose() {
-      for (const conversation of conversations.values()) {
-        if (conversation.state.sending) void conversation.interrupt()
-      }
+      // Stop polling, but leave running turns alone: a turn outliving its pane
+      // is the whole point of running it as a managed process.
+      for (const conversation of conversations.values()) conversation.dispose()
       conversations.clear()
     },
   }

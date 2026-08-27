@@ -2,3 +2,4 @@ node_modules/
 *.tsbuildinfo
 dist/*.pdb
 dist/turn.mjs
+dist/reduce.mjs

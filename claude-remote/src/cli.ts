@@ -41,11 +41,14 @@ async function main(): Promise<void> {
     case 'turn': {
       const key = rest[0]
       if (!key) {
-        emit({ type: 'error', error: 'usage: turn <staged-request-key> [--stdin-lease]' })
+        emit({ type: 'error', error: 'usage: turn <staged-request-key> [--stdin-lease] [--persist]' })
         code = 1
         break
       }
-      code = await runTurn(key, rest.includes('--stdin-lease'))
+      code = await runTurn(key, {
+        stdinLease: rest.includes('--stdin-lease'),
+        persist: rest.includes('--persist'),
+      })
       break
     }
     case 'help':

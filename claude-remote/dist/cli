@@ -172,6 +172,141 @@ function compareVersions(a, b) {
 var fs2 = __toESM(require("node:fs"));
 var path2 = __toESM(require("node:path"));
 var readline = __toESM(require("node:readline"));
+
+// src/protocol.ts
+function isInit(e) {
+  return e.type === "system" && e.subtype === "init";
+}
+function isResult(e) {
+  return e.type === "result";
+}
+function textDelta(e) {
+  if (e.type !== "stream_event") return null;
+  const delta = e.event?.delta;
+  return delta?.type === "text_delta" && typeof delta.text === "string" ? delta.text : null;
+}
+function assistantText(e) {
+  if (e.type !== "assistant") return null;
+  const parts = e.message?.content;
+  if (!Array.isArray(parts)) return null;
+  const text = parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("");
+  return text || null;
+}
+
+// src/reduce.ts
+function createTurnReducer(turnId, prompt, now = Date.now) {
+  const messages = [{ role: "user", text: prompt }];
+  let sessionId = null;
+  let model = null;
+  let costUsd = null;
+  let status = "running";
+  let exitCode;
+  let revision = 0;
+  let updatedAt = now();
+  function touch() {
+    revision += 1;
+    updatedAt = now();
+  }
+  function currentAssistant() {
+    const last = messages[messages.length - 1];
+    if (last?.role === "assistant" && last.streaming) return last;
+    const created = { role: "assistant", text: "", streaming: true };
+    messages.push(created);
+    return created;
+  }
+  function settleStreaming() {
+    const last = messages[messages.length - 1];
+    if (last?.role === "assistant") delete last.streaming;
+  }
+  const reducer = {
+    get revision() {
+      return revision;
+    },
+    apply(event) {
+      if (isInit(event)) {
+        sessionId = event.session_id;
+        if (event.model) model = event.model;
+        touch();
+        return;
+      }
+      const delta = textDelta(event);
+      if (delta) {
+        currentAssistant().text += delta;
+        touch();
+        return;
+      }
+      const assembled = assistantText(event);
+      if (assembled !== null) {
+        currentAssistant().text = assembled;
+        touch();
+        return;
+      }
+      if (isResult(event)) {
+        settleStreaming();
+        if (typeof event.total_cost_usd === "number") costUsd = event.total_cost_usd;
+        if (event.is_error) {
+          const detail = event.result || "Claude Code reported an error";
+          const suffix = event.api_error_status ? ` (HTTP ${event.api_error_status})` : "";
+          const last = messages[messages.length - 1];
+          if (last?.role === "assistant" && last.text === detail) {
+            messages[messages.length - 1] = { role: "error", text: `${detail}${suffix}` };
+          } else {
+            messages.push({ role: "error", text: `${detail}${suffix}` });
+          }
+        } else if (event.result && !lastAssistantHasText()) {
+          messages.push({ role: "assistant", text: event.result });
+        }
+        touch();
+        return;
+      }
+      if (event.type === "sidecar") {
+        const sidecar = event;
+        if (sidecar.event === "error") {
+          messages.push({ role: "error", text: sidecar.error ?? "sidecar error" });
+          touch();
+        } else if (sidecar.event === "stderr" && sidecar.data) {
+          messages.push({ role: "system", text: sidecar.data });
+          touch();
+        } else if (sidecar.event === "stopping") {
+          messages.push({ role: "system", text: "Interrupted." });
+          touch();
+        }
+      }
+    },
+    finish(code) {
+      settleStreaming();
+      exitCode = code;
+      status = code === 0 ? "done" : "failed";
+      if (code !== 0 && !messages.some((m) => m.role === "error")) {
+        messages.push({ role: "error", text: `Claude Code exited with code ${code}` });
+      }
+      touch();
+    },
+    snapshot() {
+      return {
+        turnId,
+        status,
+        sessionId,
+        model,
+        costUsd,
+        exitCode,
+        updatedAt,
+        // Deep enough: messages are flat records, and the consumer only reads.
+        messages: messages.map((m) => ({ ...m }))
+      };
+    }
+  };
+  function lastAssistantHasText() {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === "assistant") return Boolean(messages[i].text);
+    }
+    return false;
+  }
+  return reducer;
+}
+
+// src/turn.ts
+var FLUSH_INTERVAL_MS = 150;
 function emit(value) {
   process.stdout.write(JSON.stringify(value) + "\n");
 }
@@ -204,6 +339,40 @@ function readRequest(key) {
     return { error: `staged turn is not valid JSON: ${e instanceof Error ? e.message : e}` };
   }
 }
+function createSnapshotWriter(turnId, dataDir) {
+  const target = path2.join(dataDir, `${turnId}-log.json`);
+  const staging = `${target}.tmp`;
+  let lastRevision = -1;
+  let timer = null;
+  function writeNow(reducer) {
+    if (reducer.revision === lastRevision) return;
+    lastRevision = reducer.revision;
+    try {
+      fs2.writeFileSync(staging, JSON.stringify(reducer.snapshot()), "utf-8");
+      fs2.renameSync(staging, target);
+    } catch (e) {
+      emit({ type: "sidecar", event: "error", error: `snapshot write failed: ${describe(e)}` });
+    }
+  }
+  return {
+    /** Coalescing flush: at most one write per interval while tokens stream. */
+    schedule(reducer) {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        writeNow(reducer);
+      }, FLUSH_INTERVAL_MS);
+      timer.unref?.();
+    },
+    flush(reducer) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      writeNow(reducer);
+    }
+  };
+}
 function forwardLines(stream, onLine) {
   return new Promise((resolve) => {
     let buffer = "";
@@ -225,15 +394,14 @@ function forwardLines(stream, onLine) {
     stream.on("error", () => resolve());
   });
 }
-function installStopHandlers(child, stdinLease) {
+function installStopHandlers(child, stdinLease, onStop) {
   if (!stdinLease) return () => {
   };
   let stopped = false;
   const stop = (reason) => {
     if (stopped) return;
     stopped = true;
-    const outcome = interruptTurn(child);
-    emit({ type: "sidecar", event: "stopping", reason, outcome });
+    onStop(reason, interruptTurn(child));
   };
   const rl = readline.createInterface({ input: process.stdin });
   rl.on("line", (line) => {
@@ -247,15 +415,34 @@ function installStopHandlers(child, stdinLease) {
   rl.on("close", () => stop("stdin-closed"));
   return () => rl.close();
 }
-async function runTurn(key, stdinLease) {
+async function runTurn(key, options) {
+  const dataDir = process.env.DINOTTY_PLUGIN_DATA_DIR ?? "";
+  const persist = options.persist && Boolean(dataDir);
   const request = readRequest(key);
   if ("error" in request) {
-    emit({ type: "sidecar", event: "error", error: request.error });
+    const failure = { type: "sidecar", event: "error", error: request.error };
+    emit(failure);
+    if (persist) {
+      const reducer2 = createTurnReducer(key, "(prompt unavailable)");
+      reducer2.apply(failure);
+      reducer2.finish(1);
+      createSnapshotWriter(key, dataDir).flush(reducer2);
+    }
     return 1;
   }
+  const reducer = createTurnReducer(key, request.prompt);
+  const writer = persist ? createSnapshotWriter(key, dataDir) : null;
+  const record = (event) => {
+    reducer.apply(event);
+    writer?.schedule(reducer);
+  };
   const located = await locateClaude();
   if (!located) {
-    emit({ type: "sidecar", event: "error", error: "claude executable not found" });
+    const failure = { type: "sidecar", event: "error", error: "claude executable not found" };
+    emit(failure);
+    reducer.apply(failure);
+    reducer.finish(1);
+    writer?.flush(reducer);
     return 1;
   }
   const child = spawnTurn(located.bin, request.prompt, request);
@@ -266,20 +453,42 @@ async function runTurn(key, stdinLease) {
     pid: child.pid ?? null,
     resumed: Boolean(request.resumeSessionId)
   });
-  const releaseStopHandlers = installStopHandlers(child, stdinLease);
-  const stdoutDone = child.stdout ? forwardLines(child.stdout, (line) => process.stdout.write(line + "\n")) : Promise.resolve();
-  const stderrDone = child.stderr ? forwardLines(child.stderr, (line) => emit({ type: "sidecar", event: "stderr", data: line })) : Promise.resolve();
+  writer?.flush(reducer);
+  const releaseStopHandlers = installStopHandlers(child, options.stdinLease, (reason, outcome) => {
+    const event = { type: "sidecar", event: "stopping", reason, outcome };
+    emit(event);
+    record(event);
+  });
+  const stdoutDone = child.stdout ? forwardLines(child.stdout, (line) => {
+    process.stdout.write(line + "\n");
+    try {
+      record(JSON.parse(line));
+    } catch {
+    }
+  }) : Promise.resolve();
+  const stderrDone = child.stderr ? forwardLines(child.stderr, (line) => {
+    const event = { type: "sidecar", event: "stderr", data: line };
+    emit(event);
+    record(event);
+  }) : Promise.resolve();
   const exit = await new Promise((resolve) => {
     child.on("error", (e) => {
-      emit({ type: "sidecar", event: "error", error: e.message });
+      const event = { type: "sidecar", event: "error", error: e.message };
+      emit(event);
+      record(event);
       resolve({ code: 1, signal: null });
     });
     child.on("close", (code, signal) => resolve({ code, signal }));
   });
   await Promise.all([stdoutDone, stderrDone]);
   releaseStopHandlers();
+  reducer.finish(exit.code);
+  writer?.flush(reducer);
   emit({ type: "sidecar", event: "exit", code: exit.code, signal: exit.signal });
   return exit.code ?? 0;
+}
+function describe(e) {
+  return e instanceof Error ? e.message : String(e);
 }
 
 // src/cli.ts
@@ -306,11 +515,14 @@ async function main() {
     case "turn": {
       const key = rest[0];
       if (!key) {
-        emit2({ type: "error", error: "usage: turn <staged-request-key> [--stdin-lease]" });
+        emit2({ type: "error", error: "usage: turn <staged-request-key> [--stdin-lease] [--persist]" });
         code = 1;
         break;
       }
-      code = await runTurn(key, rest.includes("--stdin-lease"));
+      code = await runTurn(key, {
+        stdinLease: rest.includes("--stdin-lease"),
+        persist: rest.includes("--persist")
+      });
       break;
     }
     case "help":

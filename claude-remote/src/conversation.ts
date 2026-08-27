@@ -1,38 +1,37 @@
-import type { PluginContext, SpawnHandle } from '../../plugin-api/index'
-import {
-  NdjsonReader,
-  isInit,
-  isResult,
-  textDelta,
-  assistantText,
-  type StreamEvent,
-} from './protocol'
+import type { PluginContext } from '../../plugin-api/index'
+import type { Message, TurnSnapshot } from './reduce'
 
 /**
  * Browser-side conversation state for one pane.
  *
- * One instance per pane. The pane never talks to Claude directly — it stages a
- * request through `ctx.storage`, spawns the sidecar, and consumes the NDJSON it
- * forwards.
+ * A turn runs as a **managed process**, not through `ctx.exec.spawn`. The spawn
+ * WebSocket owns the child's lifetime — when that socket closes, the host kills
+ * the process, regardless of `lifecycle.scope` — so a phone locking its screen
+ * mid-turn would kill the turn. `ctx.process.start` is supervised independently
+ * and survives.
+ *
+ * The cost is that a managed process's stdout is unreadable: it is drained into
+ * a bounded host-side buffer with no API in front of it. So the sidecar writes
+ * its reduced state to `<turnId>-log.json` and the pane polls it with
+ * `ctx.storage.get()`. Polling is also what makes reconnecting work: picking a
+ * turn back up is just resuming the poll, from any device.
  */
 
-export type Role = 'user' | 'assistant' | 'error' | 'system'
-
-export interface Message {
-  role: Role
-  text: string
-  /** Set while the assistant message is still streaming. */
-  streaming?: boolean
-}
+export type { Message, TurnSnapshot }
 
 export interface ConversationState {
-  messages: Message[]
+  /** Completed turns, oldest first. */
+  history: Message[]
+  /** The turn currently running, if any. */
+  live: Message[]
   draft: string
   sending: boolean
   sessionId: string | null
   model: string | null
   lastCostUsd: number | null
   permissionMode: string
+  /** True when this pane attached to a turn it did not start. */
+  reattached: boolean
 }
 
 export interface Conversation {
@@ -41,6 +40,15 @@ export interface Conversation {
   interrupt(): Promise<void>
   reset(): void
   restore(): Promise<void>
+  dispose(): void
+}
+
+interface PersistedSession {
+  sessionId?: string
+  model?: string
+  history?: Message[]
+  /** Set while a turn is in flight, so a reload can find it again. */
+  activeTurnId?: string
 }
 
 /**
@@ -56,6 +64,11 @@ function nextTurnId(): string {
 }
 
 const DEFAULT_PERMISSION_MODE = 'acceptEdits'
+const POLL_INTERVAL_MS = 250
+/** A snapshot that stops advancing while no process owns it is a dead turn. */
+const STALE_AFTER_MS = 15_000
+/** Keep the transcript bounded; this is a live pane, not a history browser. */
+const MAX_HISTORY_MESSAGES = 200
 
 export function createConversation(
   ctx: PluginContext,
@@ -63,13 +76,15 @@ export function createConversation(
   onError: (message: string) => void,
 ): Conversation {
   const state = ctx.reactive<ConversationState>({
-    messages: [],
+    history: [],
+    live: [],
     draft: '',
     sending: false,
     sessionId: null,
     model: null,
     lastCostUsd: null,
     permissionMode: DEFAULT_PERMISSION_MODE,
+    reattached: false,
   }) as ConversationState
 
   // Keyed by pane so two panes are two conversations, and so a reopened pane
@@ -77,107 +92,133 @@ export function createConversation(
   const sessionKey = `session-${paneKey.replace(/[^a-zA-Z0-9_-]/g, '_')}`
 
   let activeTurnId: string | null = null
-  let activeHandle: SpawnHandle | null = null
+  let pollTimer: ReturnType<typeof setTimeout> | null = null
+  let disposed = false
 
-  async function restore(): Promise<void> {
+  async function loadSession(): Promise<PersistedSession | undefined> {
     try {
-      const saved = await ctx.storage.get<{ sessionId?: string; model?: string }>(sessionKey)
-      if (saved?.sessionId) {
-        state.sessionId = saved.sessionId
-        state.model = saved.model ?? null
-        state.messages.push({
-          role: 'system',
-          text: `Resuming session ${saved.sessionId.slice(0, 8)}…`,
-        })
-      }
+      return await ctx.storage.get<PersistedSession>(sessionKey)
     } catch {
-      // A missing key is the normal first-run case.
+      return undefined
     }
   }
 
-  async function persistSession(): Promise<void> {
-    if (!state.sessionId) return
+  async function saveSession(patch: Partial<PersistedSession>): Promise<void> {
     try {
-      await ctx.storage.set(sessionKey, { sessionId: state.sessionId, model: state.model })
+      const existing = (await loadSession()) ?? {}
+      await ctx.storage.set(sessionKey, { ...existing, ...patch })
     } catch (e) {
-      onError(`could not persist session id: ${describe(e)}`)
+      onError(`could not persist session: ${describe(e)}`)
     }
   }
 
-  function currentAssistant(): Message {
-    const last = state.messages[state.messages.length - 1]
-    if (last?.role === 'assistant' && last.streaming) return last
-    const created: Message = { role: 'assistant', text: '', streaming: true }
-    state.messages.push(created)
-    return created
+  function absorbSnapshot(snapshot: TurnSnapshot): void {
+    state.live = snapshot.messages
+    if (snapshot.sessionId) state.sessionId = snapshot.sessionId
+    if (snapshot.model) state.model = snapshot.model
+    if (snapshot.costUsd !== null) state.lastCostUsd = snapshot.costUsd
   }
 
-  function dispatch(event: StreamEvent): void {
-    if (isInit(event)) {
-      // Claude assigns the session id; resuming reuses the same one.
-      state.sessionId = event.session_id
-      state.model = event.model ?? state.model
-      void persistSession()
-      return
+  async function finishTurn(snapshot: TurnSnapshot | null): Promise<void> {
+    if (snapshot) {
+      state.history.push(...snapshot.messages)
+      if (state.history.length > MAX_HISTORY_MESSAGES) {
+        state.history.splice(0, state.history.length - MAX_HISTORY_MESSAGES)
+      }
     }
-
-    const delta = textDelta(event)
-    if (delta) {
-      currentAssistant().text += delta
-      return
+    state.live = []
+    state.sending = false
+    state.reattached = false
+    const finishedTurnId = activeTurnId
+    activeTurnId = null
+    await saveSession({
+      sessionId: state.sessionId ?? undefined,
+      model: state.model ?? undefined,
+      history: state.history,
+      activeTurnId: undefined,
+    })
+    if (finishedTurnId) {
+      try { await ctx.storage.delete(`${finishedTurnId}-log`) } catch { /* already gone */ }
     }
+  }
 
-    const assembled = assistantText(event)
-    if (assembled !== null) {
-      // The complete message is authoritative over accumulated deltas: with
-      // --include-partial-messages both arrive, and only this one is final.
-      currentAssistant().text = assembled
-      return
-    }
+  /**
+   * Follow a turn by polling its snapshot. Safe to call for a turn this pane
+   * started and for one it is picking up after a reconnect.
+   */
+  function follow(turnId: string): void {
+    activeTurnId = turnId
+    state.sending = true
+    let lastSeenAt = Date.now()
+    let lastUpdatedAt = -1
 
-    if (isResult(event)) {
-      const streaming = state.messages[state.messages.length - 1]
-      if (streaming?.role === 'assistant') streaming.streaming = false
-      state.lastCostUsd = typeof event.total_cost_usd === 'number' ? event.total_cost_usd : null
+    const tick = async () => {
+      if (disposed || activeTurnId !== turnId) return
+      let snapshot: TurnSnapshot | undefined
+      try {
+        snapshot = await ctx.storage.get<TurnSnapshot>(`${turnId}-log`)
+      } catch {
+        // The sidecar may not have written the first snapshot yet.
+        snapshot = undefined
+      }
 
-      // The CLI exits 0 and reports API failures inside the stream, with
-      // subtype "success" and is_error true, so this has to be explicit.
-      if (event.is_error) {
-        const detail = event.result || 'Claude Code reported an error'
-        const status = event.api_error_status ? ` (HTTP ${event.api_error_status})` : ''
-        state.messages.push({ role: 'error', text: `${detail}${status}` })
+      if (snapshot) {
+        if (snapshot.updatedAt !== lastUpdatedAt) {
+          lastUpdatedAt = snapshot.updatedAt
+          lastSeenAt = Date.now()
+        }
+        absorbSnapshot(snapshot)
+        if (snapshot.status !== 'running') {
+          await finishTurn(snapshot)
+          return
+        }
+      }
+
+      // A turn whose snapshot stops advancing has lost its process — the host
+      // restarted, or the sidecar died before it could write a final state.
+      // Without this the pane would spin on a turn that will never finish.
+      if (Date.now() - lastSeenAt > STALE_AFTER_MS && !(await isTurnRunning(turnId))) {
+        state.live = [
+          ...(snapshot?.messages ?? []),
+          { role: 'error', text: 'This turn stopped without finishing.' },
+        ]
+        await finishTurn({
+          ...(snapshot ?? emptySnapshot(turnId)),
+          status: 'failed',
+          messages: state.live,
+        })
         return
       }
-      // No assistant text arrived (a tool-only turn, say) but the result has it.
-      if (event.result && !streaming?.text) {
-        state.messages.push({ role: 'assistant', text: event.result })
-      }
-      return
+
+      pollTimer = setTimeout(() => { void tick() }, POLL_INTERVAL_MS)
     }
 
-    if (event.type === 'sidecar') {
-      const sidecar = event as { event?: string; error?: string; data?: string }
-      if (sidecar.event === 'error') {
-        state.messages.push({ role: 'error', text: sidecar.error ?? 'sidecar error' })
-      } else if (sidecar.event === 'stderr' && sidecar.data) {
-        // Claude writes startup warnings here; surface them without derailing.
-        state.messages.push({ role: 'system', text: sidecar.data })
-      } else if (sidecar.event === 'stopping') {
-        state.messages.push({ role: 'system', text: 'Interrupted.' })
-      }
+    void tick()
+  }
+
+  async function isTurnRunning(turnId: string): Promise<boolean> {
+    try {
+      const processes = await ctx.process.list()
+      return processes.some(p => p.state === 'running' && p.args.includes(turnId))
+    } catch {
+      // If we cannot tell, assume it is alive rather than killing a live turn.
+      return true
     }
   }
 
-  async function drain(stream: ReadableStream<string>, onChunk: (chunk: string) => void) {
-    const reader = stream.getReader()
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        if (value) onChunk(value)
-      }
-    } finally {
-      reader.releaseLock()
+  async function restore(): Promise<void> {
+    const saved = await loadSession()
+    if (!saved) return
+    if (saved.sessionId) state.sessionId = saved.sessionId
+    if (saved.model) state.model = saved.model
+    if (saved.history?.length) state.history = saved.history
+
+    // A turn was in flight when this pane last went away. If its process is
+    // still running, or it left a finished snapshot we never consumed, pick it
+    // up instead of losing the answer.
+    if (saved.activeTurnId) {
+      state.reattached = true
+      follow(saved.activeTurnId)
     }
   }
 
@@ -185,24 +226,14 @@ export function createConversation(
     const trimmed = prompt.trim()
     if (!trimmed || state.sending) return
 
-    state.messages.push({ role: 'user', text: trimmed })
+    const turnId = nextTurnId()
     state.draft = ''
+    state.live = [{ role: 'user', text: trimmed }]
     state.sending = true
 
-    const turnId = nextTurnId()
-    activeTurnId = turnId
-
-    const reader = new NdjsonReader()
-    const consume = (chunk: string) => {
-      for (const parsed of reader.push(chunk)) {
-        if (parsed.ok) dispatch(parsed.event)
-        else onError(`unparseable line from sidecar: ${parsed.raw.slice(0, 200)}`)
-      }
-    }
-
     try {
-      // The prompt travels through storage, not argv: spawn args are carried in
-      // a WebSocket URL query string.
+      // The prompt travels through storage, not argv: process args are visible
+      // in `process.list()` and spawn args ride in a URL query string.
       await ctx.storage.set(turnId, {
         prompt: trimmed,
         cwd: ctx.terminal.activeCwd() ?? undefined,
@@ -210,76 +241,80 @@ export function createConversation(
         permissionMode: state.permissionMode,
         partialMessages: true,
       })
+      // Recorded before the process starts: if the browser dies in between, the
+      // pane can still find the turn and decide what happened to it.
+      await saveSession({ activeTurnId: turnId })
 
-      // --stdin-lease matches bin.lifecycle.stdinLease in the manifest: it tells
-      // the sidecar that a closed stdin means "stop", not "never had one".
-      const handle = ctx.exec.spawn(['turn', turnId, '--stdin-lease'])
-      activeHandle = handle
+      // --stdin-lease matches bin.lifecycle.stdinLease: it tells the sidecar
+      // that a closed stdin means "stop", not "never had one". --persist makes
+      // it write the snapshot this pane polls.
+      await ctx.process.start(['turn', turnId, '--stdin-lease', '--persist'])
 
-      await Promise.all([
-        drain(handle.stdout, consume),
-        drain(handle.stderr, chunk => onError(chunk.trim())),
-      ])
-
-      for (const parsed of reader.flush()) {
-        if (parsed.ok) dispatch(parsed.event)
-      }
+      follow(turnId)
     } catch (e) {
-      state.messages.push({ role: 'error', text: describe(e) })
-    } finally {
-      const last = state.messages[state.messages.length - 1]
-      if (last?.role === 'assistant') last.streaming = false
+      state.live = [...state.live, { role: 'error', text: describe(e) }]
       state.sending = false
-      activeHandle = null
-      activeTurnId = null
-      // Best effort: the sidecar deletes the staged file itself, so this only
-      // matters when the spawn never happened.
-      try { await ctx.storage.delete(turnId) } catch { /* already gone */ }
+      await saveSession({ activeTurnId: undefined })
+      try { await ctx.storage.delete(turnId) } catch { /* nothing staged */ }
     }
   }
 
   /**
    * End the running turn without abandoning it.
    *
-   * `SpawnHandle.kill()` closes the WebSocket, and the host reacts to that by
-   * hard-killing the sidecar — which would leave the turn unfinished in the
-   * session. The graceful path is `process.stop(pid)`: that triggers the stdin
-   * lease, the sidecar receives the shutdown line, and it SIGINTs Claude so the
-   * turn ends properly. The turn id is in the process args, which is how the
-   * right pid is found.
+   * `ctx.process.stop(pid)` triggers the stdin lease: the sidecar receives the
+   * shutdown line and SIGINTs Claude, so the turn ends cleanly instead of being
+   * left unfinished in the session transcript. The turn id is in the process
+   * args, which is how the right pid is found.
    */
   async function interrupt(): Promise<void> {
-    if (!state.sending) return
-    const turnId = activeTurnId
+    if (!state.sending || !activeTurnId) return
     try {
-      if (turnId) {
-        const processes = await ctx.process.list()
-        const match = processes.find(p => p.state === 'running' && p.args.includes(turnId))
-        if (match) {
-          await ctx.process.stop(match.pid)
-          return
-        }
+      const processes = await ctx.process.list()
+      const match = processes.find(p => p.state === 'running' && p.args.includes(activeTurnId!))
+      if (match) {
+        await ctx.process.stop(match.pid)
+        return // The snapshot will report the stop; the poll picks it up.
       }
-      // Nothing to stop gracefully; fall back to tearing the stream down.
-      activeHandle?.kill()
-      state.messages.push({
-        role: 'system',
-        text: 'Interrupted abruptly — this turn may be left unfinished in the session.',
-      })
+      // Nothing is running: the turn already ended and the poll will settle it.
+      onError('nothing to interrupt — the turn already ended')
     } catch (e) {
       onError(`interrupt failed: ${describe(e)}`)
     }
   }
 
   function reset(): void {
-    state.messages.splice(0, state.messages.length)
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+    activeTurnId = null
+    state.history = []
+    state.live = []
+    state.sending = false
+    state.reattached = false
     state.sessionId = null
     state.model = null
     state.lastCostUsd = null
     void ctx.storage.delete(sessionKey).catch(() => { /* nothing stored yet */ })
   }
 
-  return { state, send, interrupt, reset, restore }
+  function dispose(): void {
+    disposed = true
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+    // Deliberately does NOT stop the turn: surviving an unmount is the point.
+  }
+
+  return { state, send, interrupt, reset, restore, dispose }
+}
+
+function emptySnapshot(turnId: string): TurnSnapshot {
+  return {
+    turnId,
+    status: 'failed',
+    sessionId: null,
+    model: null,
+    messages: [],
+    costUsd: null,
+    updatedAt: Date.now(),
+  }
 }
 
 function describe(e: unknown): string {

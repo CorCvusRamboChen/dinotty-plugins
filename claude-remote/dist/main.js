@@ -1,50 +1,3 @@
-// src/protocol.ts
-var NdjsonReader = class {
-  buffer = "";
-  push(chunk) {
-    this.buffer += chunk;
-    const out = [];
-    let index;
-    while ((index = this.buffer.indexOf("\n")) !== -1) {
-      const line = this.buffer.slice(0, index).replace(/\r$/, "");
-      this.buffer = this.buffer.slice(index + 1);
-      if (line.trim()) out.push(parseLine(line));
-    }
-    return out;
-  }
-  /** Call on process exit: the last line may have no trailing newline. */
-  flush() {
-    const line = this.buffer.replace(/\r$/, "");
-    this.buffer = "";
-    return line.trim() ? [parseLine(line)] : [];
-  }
-};
-function parseLine(line) {
-  try {
-    return { ok: true, event: JSON.parse(line) };
-  } catch (e) {
-    return { ok: false, raw: line, error: e instanceof Error ? e.message : String(e) };
-  }
-}
-function isInit(e) {
-  return e.type === "system" && e.subtype === "init";
-}
-function isResult(e) {
-  return e.type === "result";
-}
-function textDelta(e) {
-  if (e.type !== "stream_event") return null;
-  const delta = e.event?.delta;
-  return delta?.type === "text_delta" && typeof delta.text === "string" ? delta.text : null;
-}
-function assistantText(e) {
-  if (e.type !== "assistant") return null;
-  const parts = e.message?.content;
-  if (!Array.isArray(parts)) return null;
-  const text = parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join("");
-  return text || null;
-}
-
 // src/conversation.ts
 var turnCounter = 0;
 function nextTurnId() {
@@ -53,118 +6,139 @@ function nextTurnId() {
   return `turn-${Date.now().toString(36)}-${turnCounter}-${random}`;
 }
 var DEFAULT_PERMISSION_MODE = "acceptEdits";
+var POLL_INTERVAL_MS = 250;
+var STALE_AFTER_MS = 15e3;
+var MAX_HISTORY_MESSAGES = 200;
 function createConversation(ctx, paneKey, onError) {
   const state = ctx.reactive({
-    messages: [],
+    history: [],
+    live: [],
     draft: "",
     sending: false,
     sessionId: null,
     model: null,
     lastCostUsd: null,
-    permissionMode: DEFAULT_PERMISSION_MODE
+    permissionMode: DEFAULT_PERMISSION_MODE,
+    reattached: false
   });
   const sessionKey = `session-${paneKey.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
   let activeTurnId = null;
-  let activeHandle = null;
-  async function restore() {
+  let pollTimer = null;
+  let disposed = false;
+  async function loadSession() {
     try {
-      const saved = await ctx.storage.get(sessionKey);
-      if (saved?.sessionId) {
-        state.sessionId = saved.sessionId;
-        state.model = saved.model ?? null;
-        state.messages.push({
-          role: "system",
-          text: `Resuming session ${saved.sessionId.slice(0, 8)}\u2026`
-        });
-      }
+      return await ctx.storage.get(sessionKey);
     } catch {
+      return void 0;
     }
   }
-  async function persistSession() {
-    if (!state.sessionId) return;
+  async function saveSession(patch) {
     try {
-      await ctx.storage.set(sessionKey, { sessionId: state.sessionId, model: state.model });
+      const existing = await loadSession() ?? {};
+      await ctx.storage.set(sessionKey, { ...existing, ...patch });
     } catch (e) {
-      onError(`could not persist session id: ${describe(e)}`);
+      onError(`could not persist session: ${describe(e)}`);
     }
   }
-  function currentAssistant() {
-    const last = state.messages[state.messages.length - 1];
-    if (last?.role === "assistant" && last.streaming) return last;
-    const created = { role: "assistant", text: "", streaming: true };
-    state.messages.push(created);
-    return created;
+  function absorbSnapshot(snapshot) {
+    state.live = snapshot.messages;
+    if (snapshot.sessionId) state.sessionId = snapshot.sessionId;
+    if (snapshot.model) state.model = snapshot.model;
+    if (snapshot.costUsd !== null) state.lastCostUsd = snapshot.costUsd;
   }
-  function dispatch(event) {
-    if (isInit(event)) {
-      state.sessionId = event.session_id;
-      state.model = event.model ?? state.model;
-      void persistSession();
-      return;
+  async function finishTurn(snapshot) {
+    if (snapshot) {
+      state.history.push(...snapshot.messages);
+      if (state.history.length > MAX_HISTORY_MESSAGES) {
+        state.history.splice(0, state.history.length - MAX_HISTORY_MESSAGES);
+      }
     }
-    const delta = textDelta(event);
-    if (delta) {
-      currentAssistant().text += delta;
-      return;
+    state.live = [];
+    state.sending = false;
+    state.reattached = false;
+    const finishedTurnId = activeTurnId;
+    activeTurnId = null;
+    await saveSession({
+      sessionId: state.sessionId ?? void 0,
+      model: state.model ?? void 0,
+      history: state.history,
+      activeTurnId: void 0
+    });
+    if (finishedTurnId) {
+      try {
+        await ctx.storage.delete(`${finishedTurnId}-log`);
+      } catch {
+      }
     }
-    const assembled = assistantText(event);
-    if (assembled !== null) {
-      currentAssistant().text = assembled;
-      return;
-    }
-    if (isResult(event)) {
-      const streaming = state.messages[state.messages.length - 1];
-      if (streaming?.role === "assistant") streaming.streaming = false;
-      state.lastCostUsd = typeof event.total_cost_usd === "number" ? event.total_cost_usd : null;
-      if (event.is_error) {
-        const detail = event.result || "Claude Code reported an error";
-        const status = event.api_error_status ? ` (HTTP ${event.api_error_status})` : "";
-        state.messages.push({ role: "error", text: `${detail}${status}` });
+  }
+  function follow(turnId) {
+    activeTurnId = turnId;
+    state.sending = true;
+    let lastSeenAt = Date.now();
+    let lastUpdatedAt = -1;
+    const tick = async () => {
+      if (disposed || activeTurnId !== turnId) return;
+      let snapshot;
+      try {
+        snapshot = await ctx.storage.get(`${turnId}-log`);
+      } catch {
+        snapshot = void 0;
+      }
+      if (snapshot) {
+        if (snapshot.updatedAt !== lastUpdatedAt) {
+          lastUpdatedAt = snapshot.updatedAt;
+          lastSeenAt = Date.now();
+        }
+        absorbSnapshot(snapshot);
+        if (snapshot.status !== "running") {
+          await finishTurn(snapshot);
+          return;
+        }
+      }
+      if (Date.now() - lastSeenAt > STALE_AFTER_MS && !await isTurnRunning(turnId)) {
+        state.live = [
+          ...snapshot?.messages ?? [],
+          { role: "error", text: "This turn stopped without finishing." }
+        ];
+        await finishTurn({
+          ...snapshot ?? emptySnapshot(turnId),
+          status: "failed",
+          messages: state.live
+        });
         return;
       }
-      if (event.result && !streaming?.text) {
-        state.messages.push({ role: "assistant", text: event.result });
-      }
-      return;
-    }
-    if (event.type === "sidecar") {
-      const sidecar = event;
-      if (sidecar.event === "error") {
-        state.messages.push({ role: "error", text: sidecar.error ?? "sidecar error" });
-      } else if (sidecar.event === "stderr" && sidecar.data) {
-        state.messages.push({ role: "system", text: sidecar.data });
-      } else if (sidecar.event === "stopping") {
-        state.messages.push({ role: "system", text: "Interrupted." });
-      }
+      pollTimer = setTimeout(() => {
+        void tick();
+      }, POLL_INTERVAL_MS);
+    };
+    void tick();
+  }
+  async function isTurnRunning(turnId) {
+    try {
+      const processes = await ctx.process.list();
+      return processes.some((p) => p.state === "running" && p.args.includes(turnId));
+    } catch {
+      return true;
     }
   }
-  async function drain(stream, onChunk) {
-    const reader = stream.getReader();
-    try {
-      for (; ; ) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (value) onChunk(value);
-      }
-    } finally {
-      reader.releaseLock();
+  async function restore() {
+    const saved = await loadSession();
+    if (!saved) return;
+    if (saved.sessionId) state.sessionId = saved.sessionId;
+    if (saved.model) state.model = saved.model;
+    if (saved.history?.length) state.history = saved.history;
+    if (saved.activeTurnId) {
+      state.reattached = true;
+      follow(saved.activeTurnId);
     }
   }
   async function send(prompt) {
     const trimmed = prompt.trim();
     if (!trimmed || state.sending) return;
-    state.messages.push({ role: "user", text: trimmed });
-    state.draft = "";
-    state.sending = true;
     const turnId = nextTurnId();
-    activeTurnId = turnId;
-    const reader = new NdjsonReader();
-    const consume = (chunk) => {
-      for (const parsed of reader.push(chunk)) {
-        if (parsed.ok) dispatch(parsed.event);
-        else onError(`unparseable line from sidecar: ${parsed.raw.slice(0, 200)}`);
-      }
-    };
+    state.draft = "";
+    state.live = [{ role: "user", text: trimmed }];
+    state.sending = true;
     try {
       await ctx.storage.set(turnId, {
         prompt: trimmed,
@@ -173,23 +147,13 @@ function createConversation(ctx, paneKey, onError) {
         permissionMode: state.permissionMode,
         partialMessages: true
       });
-      const handle = ctx.exec.spawn(["turn", turnId, "--stdin-lease"]);
-      activeHandle = handle;
-      await Promise.all([
-        drain(handle.stdout, consume),
-        drain(handle.stderr, (chunk) => onError(chunk.trim()))
-      ]);
-      for (const parsed of reader.flush()) {
-        if (parsed.ok) dispatch(parsed.event);
-      }
+      await saveSession({ activeTurnId: turnId });
+      await ctx.process.start(["turn", turnId, "--stdin-lease", "--persist"]);
+      follow(turnId);
     } catch (e) {
-      state.messages.push({ role: "error", text: describe(e) });
-    } finally {
-      const last = state.messages[state.messages.length - 1];
-      if (last?.role === "assistant") last.streaming = false;
+      state.live = [...state.live, { role: "error", text: describe(e) }];
       state.sending = false;
-      activeHandle = null;
-      activeTurnId = null;
+      await saveSession({ activeTurnId: void 0 });
       try {
         await ctx.storage.delete(turnId);
       } catch {
@@ -197,35 +161,54 @@ function createConversation(ctx, paneKey, onError) {
     }
   }
   async function interrupt() {
-    if (!state.sending) return;
-    const turnId = activeTurnId;
+    if (!state.sending || !activeTurnId) return;
     try {
-      if (turnId) {
-        const processes = await ctx.process.list();
-        const match = processes.find((p) => p.state === "running" && p.args.includes(turnId));
-        if (match) {
-          await ctx.process.stop(match.pid);
-          return;
-        }
+      const processes = await ctx.process.list();
+      const match = processes.find((p) => p.state === "running" && p.args.includes(activeTurnId));
+      if (match) {
+        await ctx.process.stop(match.pid);
+        return;
       }
-      activeHandle?.kill();
-      state.messages.push({
-        role: "system",
-        text: "Interrupted abruptly \u2014 this turn may be left unfinished in the session."
-      });
+      onError("nothing to interrupt \u2014 the turn already ended");
     } catch (e) {
       onError(`interrupt failed: ${describe(e)}`);
     }
   }
   function reset() {
-    state.messages.splice(0, state.messages.length);
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    activeTurnId = null;
+    state.history = [];
+    state.live = [];
+    state.sending = false;
+    state.reattached = false;
     state.sessionId = null;
     state.model = null;
     state.lastCostUsd = null;
     void ctx.storage.delete(sessionKey).catch(() => {
     });
   }
-  return { state, send, interrupt, reset, restore };
+  function dispose() {
+    disposed = true;
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+  return { state, send, interrupt, reset, restore, dispose };
+}
+function emptySnapshot(turnId) {
+  return {
+    turnId,
+    status: "failed",
+    sessionId: null,
+    model: null,
+    messages: [],
+    costUsd: null,
+    updatedAt: Date.now()
+  };
 }
 function describe(e) {
   return e instanceof Error ? e.message : String(e);
@@ -251,7 +234,8 @@ var STRINGS = {
     noCapabilities: "This Claude Code build does not report feature capabilities; falling back to version checks.",
     sessionLabel: (id) => `session ${id.slice(0, 8)}`,
     costLabel: (usd) => `$${usd.toFixed(4)}`,
-    permissionLabel: "Permissions"
+    permissionLabel: "Permissions",
+    reattached: "Reattached to a turn already in progress."
   },
   zh: {
     title: "Claude Remote",
@@ -270,7 +254,8 @@ var STRINGS = {
     noCapabilities: "\u5F53\u524D Claude Code \u4E0D\u4E0A\u62A5 capabilities\uFF0C\u5C06\u56DE\u9000\u5230\u7248\u672C\u53F7\u5224\u65AD\u3002",
     sessionLabel: (id) => `\u4F1A\u8BDD ${id.slice(0, 8)}`,
     costLabel: (usd) => `$${usd.toFixed(4)}`,
-    permissionLabel: "\u6743\u9650\u6A21\u5F0F"
+    permissionLabel: "\u6743\u9650\u6A21\u5F0F",
+    reattached: "\u5DF2\u91CD\u65B0\u63A5\u4E0A\u4E00\u4E2A\u6B63\u5728\u8FDB\u884C\u7684\u56DE\u5408\u3002"
   }
 };
 function activate(ctx) {
@@ -388,6 +373,19 @@ function activate(ctx) {
       p && p.found && !p.error && p.reportsCapabilities === false ? h("span", { class: "cr-header-warn", title: s.noCapabilities }, "!") : null
     ].filter(Boolean));
   }
+  function renderTranscript(conversation) {
+    const s = t();
+    const { state } = conversation;
+    const messages = [...state.history, ...state.live];
+    if (!messages.length) return h("div", { class: "cr-transcript" }, h("div", { class: "cr-empty" }, s.empty));
+    return h("div", { class: "cr-transcript" }, [
+      state.reattached ? h("div", { class: "cr-msg cr-msg-system" }, s.reattached) : null,
+      ...messages.map((message, i) => h("div", {
+        class: `cr-msg cr-msg-${message.role}${message.streaming ? " cr-msg-streaming" : ""}`,
+        key: i
+      }, message.text))
+    ].filter(Boolean));
+  }
   function renderComposer(conversation) {
     const s = t();
     const { state } = conversation;
@@ -433,20 +431,11 @@ function activate(ctx) {
       setup(props) {
         const conversation = conversationFor(props);
         return () => {
-          const s = t();
           const blocker = ready.value ? null : renderBlocker();
-          const { state } = conversation;
           return h("div", { class: "cr-root" }, [
             renderHeader(conversation),
             blocker ?? h("div", { class: "cr-body" }, [
-              h(
-                "div",
-                { class: "cr-transcript" },
-                state.messages.length ? state.messages.map((message, i) => h("div", {
-                  class: `cr-msg cr-msg-${message.role}${message.streaming ? " cr-msg-streaming" : ""}`,
-                  key: i
-                }, message.text)) : h("div", { class: "cr-empty" }, s.empty)
-              ),
+              renderTranscript(conversation),
               renderComposer(conversation)
             ])
           ]);
@@ -454,9 +443,7 @@ function activate(ctx) {
       }
     },
     dispose() {
-      for (const conversation of conversations.values()) {
-        if (conversation.state.sending) void conversation.interrupt();
-      }
+      for (const conversation of conversations.values()) conversation.dispose();
       conversations.clear();
     }
   };
